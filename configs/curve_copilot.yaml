@@ -1,0 +1,32 @@
+model:
+  d_model: 128
+  n_heads: 4
+  d_ff: 512
+  n_layers: 6
+  max_seq: 8
+  dropout: 0.1
+
+training:
+  batch_size: 256
+  epochs: 100
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_epochs: 5
+  gradient_clip: 1.0
+  loss_weights:
+    value: 1.0
+    tangent: 0.5
+    interpolation: 0.3
+    confidence: 0.2
+
+data:
+  train_files:
+    - data/processed/cmu_curves.h5
+    - data/processed/100style_curves.h5
+  val_split: val
+  num_workers: 4
+
+output:
+  checkpoint_dir: runs/curve_copilot
+  save_every_epochs: 10
+  log_every_steps: 100
