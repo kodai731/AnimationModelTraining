@@ -47,11 +47,21 @@ src = ["src"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "TCH"]
 
+[tool.ruff.lint.per-file-ignores]
+"src/anim_ml/server/proto/animation_ml_pb2.py" = ["E", "F", "W", "I", "UP", "B", "SIM", "TCH"]
+"src/anim_ml/server/proto/animation_ml_pb2_grpc.py" = ["E", "F", "W", "I", "UP", "B", "SIM", "TCH"]
+"src/anim_ml/server/proto/animation_ml_pb2.pyi" = ["E", "F", "W", "I", "UP", "B", "SIM", "TCH"]
+
 [tool.pyright]
 pythonVersion = "3.11"
 typeCheckingMode = "strict"
 venvPath = "."
 venv = ".venv"
+exclude = [
+    "src/anim_ml/server/proto/animation_ml_pb2.py",
+    "src/anim_ml/server/proto/animation_ml_pb2_grpc.py",
+    "src/anim_ml/server/proto/animation_ml_pb2.pyi",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

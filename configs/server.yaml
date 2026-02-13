@@ -1,0 +1,13 @@
+server:
+  port: 50051
+  max_workers: 4
+
+model:
+  name: mock
+  device: cuda
+  checkpoint: models/light_t2m/checkpoint.pt
+
+generation:
+  default_fps: 30
+  max_duration_seconds: 10.0
+  default_duration_seconds: 3.0

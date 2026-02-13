@@ -1,0 +1,19 @@
+FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir uv
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --extra server --no-dev --no-editable
+
+COPY src/ src/
+COPY configs/ configs/
+
+EXPOSE 50051
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python -c "import grpc; ch=grpc.insecure_channel('localhost:50051'); grpc.channel_ready_future(ch).result(timeout=2)" || exit 1
+
+ENTRYPOINT ["uv", "run", "python", "-m", "anim_ml.server.service"]
+CMD ["--config", "configs/server.yaml"]

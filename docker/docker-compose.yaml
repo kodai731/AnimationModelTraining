@@ -1,0 +1,16 @@
+services:
+  text-to-motion:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    ports:
+      - "50051:50051"
+    volumes:
+      - ../models:/app/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
