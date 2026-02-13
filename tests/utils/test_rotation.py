@@ -3,6 +3,7 @@ import pytest
 from numpy.testing import assert_allclose
 
 from anim_ml.utils.rotation import (
+    euler_to_matrix,
     euler_xyz_to_quaternion,
     matrix_to_quaternion,
     quaternion_geodesic_distance,
@@ -151,6 +152,52 @@ class TestGeodesicDistance:
         dist = quaternion_geodesic_distance(q1, q2)
         assert dist.shape == (5,)
         assert_allclose(dist, 0.0, atol=1e-7)
+
+
+@pytest.mark.unit
+class TestEulerToMatrix:
+    def test_identity(self) -> None:
+        angles = np.array([0.0, 0.0, 0.0])
+        result = euler_to_matrix(angles, "XYZ")
+        assert_allclose(result, IDENTITY_MATRIX, atol=1e-7)
+
+    def test_xyz_matches_quaternion_path(self) -> None:
+        rng = np.random.default_rng(55)
+        euler = rng.uniform(-np.pi, np.pi, (20, 3))
+
+        mat_direct = euler_to_matrix(euler, "XYZ")
+        quat = euler_xyz_to_quaternion(euler)
+        mat_via_quat = quaternion_to_matrix(quat)
+
+        assert_allclose(mat_direct, mat_via_quat, atol=1e-6)
+
+    def test_zxy_90deg_x(self) -> None:
+        angles = np.array([0.0, np.pi / 2, 0.0])
+        mat = euler_to_matrix(angles, "ZXY")
+        expected = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float64)
+        assert_allclose(mat, expected, atol=1e-7)
+
+    def test_all_orders_identity(self) -> None:
+        angles = np.array([0.0, 0.0, 0.0])
+        for order in ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]:
+            result = euler_to_matrix(angles, order)
+            assert_allclose(result, IDENTITY_MATRIX, atol=1e-7)
+
+    def test_batch_shape(self) -> None:
+        angles = np.zeros((3, 5, 3))
+        result = euler_to_matrix(angles, "ZXY")
+        assert result.shape == (3, 5, 3, 3)
+
+    def test_invalid_order_raises(self) -> None:
+        with pytest.raises(ValueError, match="Invalid Euler order"):
+            euler_to_matrix(np.zeros(3), "ABC")
+
+    def test_single_axis_rotation(self) -> None:
+        angle = np.pi / 4
+        mat = euler_to_matrix(np.array([angle, 0.0, 0.0]), "XYZ")
+        c, s = np.cos(angle), np.sin(angle)
+        expected = np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+        assert_allclose(mat, expected, atol=1e-7)
 
 
 @pytest.mark.unit

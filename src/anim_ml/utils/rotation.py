@@ -110,6 +110,48 @@ def quaternion_geodesic_distance(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
     return 2.0 * np.arccos(np.clip(np.abs(dot), 0.0, 1.0))
 
 
+def euler_to_matrix(angles: np.ndarray, order: str = "XYZ") -> np.ndarray:
+    if len(order) != 3 or not set(order.upper()).issubset({"X", "Y", "Z"}):
+        msg = f"Invalid Euler order: {order}"
+        raise ValueError(msg)
+
+    axis_map = {"X": 0, "Y": 1, "Z": 2}
+    axes = [axis_map[c] for c in order.upper()]
+
+    r0 = _axis_rotation_matrices(angles[..., 0], axes[0])
+    r1 = _axis_rotation_matrices(angles[..., 1], axes[1])
+    r2 = _axis_rotation_matrices(angles[..., 2], axes[2])
+
+    return r0 @ r1 @ r2
+
+
+def _axis_rotation_matrices(angles: np.ndarray, axis: int) -> np.ndarray:
+    c = np.cos(angles)
+    s = np.sin(angles)
+    ones = np.ones_like(angles)
+    zeros = np.zeros_like(angles)
+
+    if axis == 0:
+        return np.stack([
+            np.stack([ones, zeros, zeros], axis=-1),
+            np.stack([zeros, c, -s], axis=-1),
+            np.stack([zeros, s, c], axis=-1),
+        ], axis=-2)
+
+    if axis == 1:
+        return np.stack([
+            np.stack([c, zeros, s], axis=-1),
+            np.stack([zeros, ones, zeros], axis=-1),
+            np.stack([-s, zeros, c], axis=-1),
+        ], axis=-2)
+
+    return np.stack([
+        np.stack([c, -s, zeros], axis=-1),
+        np.stack([s, c, zeros], axis=-1),
+        np.stack([zeros, zeros, ones], axis=-1),
+    ], axis=-2)
+
+
 def _normalize_vectors(v: np.ndarray) -> np.ndarray:
     norm: np.ndarray = np.linalg.norm(v, axis=-1, keepdims=True)
     norm = np.maximum(norm, 1e-8)
