@@ -8,7 +8,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-STYLE100_URL = "https://zenodo.org/records/4687771/files/100STYLE_BVH.zip"
+STYLE100_URL = "https://zenodo.org/records/8127870/files/100STYLE.zip?download=1"
 
 
 def download_file(url: str, dest: Path) -> bool:
@@ -67,7 +67,7 @@ def extract_zip(zip_path: Path, output_dir: Path, limit: int | None = None) -> l
 def download_100style(output_dir: Path, limit: int | None = None) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    zip_path = output_dir / "100STYLE_BVH.zip"
+    zip_path = output_dir / "100STYLE.zip"
     if not download_file(STYLE100_URL, zip_path):
         return []
 
@@ -78,8 +78,10 @@ def download_100style(output_dir: Path, limit: int | None = None) -> list[Path]:
 
 
 def main() -> None:
+    from anim_ml.paths import get_raw_data_dir
+
     parser = argparse.ArgumentParser(description="Download 100STYLE BVH files")
-    parser.add_argument("--output-dir", type=Path, default=Path("data/raw/100style"))
+    parser.add_argument("--output-dir", type=Path, default=get_raw_data_dir() / "100style")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of BVH files")
     args = parser.parse_args()
 

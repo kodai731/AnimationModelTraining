@@ -206,5 +206,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Timing logs
+log/
+
 # Claude local
 .claude/local

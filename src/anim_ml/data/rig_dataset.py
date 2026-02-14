@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import os
+from typing import TYPE_CHECKING
+
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import h5py  # type: ignore[import-untyped]
 import numpy as np
@@ -13,75 +16,71 @@ if TYPE_CHECKING:
 
 class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
     def __init__(self, hdf5_paths: list[Path], split: str = "train") -> None:
-        self._files: list[h5py.File] = []
-        self._lengths: list[int] = []
-        self._cumulative: list[int] = []
-        self._adjacency: np.ndarray | None = None
+        self._adjacency_np: np.ndarray | None = None
 
-        cumsum = 0
+        features_chunks: list[torch.Tensor] = []
+        types_chunks: list[torch.Tensor] = []
+        deltas_chunks: list[torch.Tensor] = []
+        confidence_chunks: list[torch.Tensor] = []
+
         for path in hdf5_paths:
-            f = h5py.File(path, "r")
-            if split not in f:
-                f.close()
-                continue
+            with h5py.File(path, "r") as f:
+                if split not in f:
+                    continue
 
-            self._files.append(f)
-            grp: Any = f[split]
-            n: int = grp["joint_features"].shape[0]
-            self._lengths.append(n)
-            cumsum += n
-            self._cumulative.append(cumsum)
+                if self._adjacency_np is None and "adjacency" in f:
+                    self._adjacency_np = np.array(f["adjacency"])
 
-            if self._adjacency is None and "adjacency" in f:
-                self._adjacency = np.array(f["adjacency"])
+                grp = f[split]
+                features_chunks.append(torch.from_numpy(np.array(grp["joint_features"], dtype=np.float32)))
+                types_chunks.append(torch.from_numpy(np.array(grp["joint_types"], dtype=np.int64)))
+                deltas_chunks.append(torch.from_numpy(np.array(grp["target_deltas"], dtype=np.float32)))
+                confidence_chunks.append(torch.from_numpy(np.array(grp["confidence_targets"], dtype=np.float32)))
 
-        self._split = split
-        self._total: int = cumsum
+        if features_chunks:
+            self._joint_features = torch.cat(features_chunks)
+            self._joint_types = torch.cat(types_chunks)
+            self._target_deltas = torch.cat(deltas_chunks)
+            self._confidence_targets = torch.cat(confidence_chunks)
+            self._move_to_shared_memory()
+        else:
+            self._joint_features = torch.empty(0)
+            self._joint_types = torch.empty(0, dtype=torch.int64)
+            self._target_deltas = torch.empty(0)
+            self._confidence_targets = torch.empty(0)
+
+    def _move_to_shared_memory(self) -> None:
+        if len(self._joint_features) == 0:
+            return
+        self._joint_features.share_memory_()
+        self._joint_types.share_memory_()
+        self._target_deltas.share_memory_()
+        self._confidence_targets.share_memory_()
 
     @property
     def adjacency(self) -> np.ndarray:
-        if self._adjacency is None:
+        if self._adjacency_np is None:
             msg = "No adjacency data found in HDF5 files"
             raise ValueError(msg)
-        return self._adjacency
+        return self._adjacency_np
 
     def __len__(self) -> int:
-        return self._total
+        return len(self._joint_features)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        if index < 0 or index >= self._total:
-            msg = f"Index {index} out of range [0, {self._total})"
+        if index < 0 or index >= len(self._joint_features):
+            msg = f"Index {index} out of range [0, {len(self._joint_features)})"
             raise IndexError(msg)
 
-        file_idx, local_idx = self._resolve_index(index)
-        grp: Any = self._files[file_idx][self._split]
-
-        joint_features: np.ndarray = np.array(grp["joint_features"][local_idx], dtype=np.float32)
-        joint_types: np.ndarray = np.array(grp["joint_types"][local_idx], dtype=np.int64)
-        target_deltas: np.ndarray = np.array(grp["target_deltas"][local_idx], dtype=np.float32)
-        confidence_targets: np.ndarray = np.array(
-            grp["confidence_targets"][local_idx], dtype=np.float32,
-        )
-
         return {
-            "joint_features": torch.from_numpy(joint_features),  # type: ignore[no-any-return]
-            "joint_types": torch.from_numpy(joint_types),  # type: ignore[no-any-return]
-            "target_deltas": torch.from_numpy(target_deltas),  # type: ignore[no-any-return]
-            "confidence_targets": torch.from_numpy(confidence_targets),  # type: ignore[no-any-return]
+            "joint_features": self._joint_features[index],
+            "joint_types": self._joint_types[index],
+            "target_deltas": self._target_deltas[index],
+            "confidence_targets": self._confidence_targets[index],
         }
 
     def close(self) -> None:
-        for f in self._files:
-            f.close()
-        self._files.clear()
-        self._lengths.clear()
-        self._cumulative.clear()
-        self._total = 0
-
-    def _resolve_index(self, index: int) -> tuple[int, int]:
-        for file_idx, cum in enumerate(self._cumulative):
-            if index < cum:
-                prev = self._cumulative[file_idx - 1] if file_idx > 0 else 0
-                return file_idx, index - prev
-        msg = f"Index {index} out of range"
-        raise IndexError(msg)
+        self._joint_features = torch.empty(0)
+        self._joint_types = torch.empty(0, dtype=torch.int64)
+        self._target_deltas = torch.empty(0)
+        self._confidence_targets = torch.empty(0)

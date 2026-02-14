@@ -65,9 +65,16 @@ def export_to_onnx(
 
 
 def main() -> None:
+    from anim_ml.paths import get_exports_dir, get_runs_dir
+
+    default_checkpoint = str(get_runs_dir() / "rig_propagation" / "best.pt")
+    default_output = str(get_exports_dir() / "rig_propagation.onnx")
+
     parser = argparse.ArgumentParser(description="Export Rig Propagation to ONNX")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
-    parser.add_argument("--output", type=str, required=True, help="Output ONNX path")
+    parser.add_argument(
+        "--checkpoint", type=str, default=default_checkpoint, help="Model checkpoint path",
+    )
+    parser.add_argument("--output", type=str, default=default_output, help="Output ONNX path")
     parser.add_argument("--opset", type=int, default=17, help="ONNX opset version")
     args = parser.parse_args()
 

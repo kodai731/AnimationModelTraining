@@ -70,3 +70,11 @@ Detailed design in `.claude/local/Design/`:
 ## Last Conservation
 - read the last conversation before start session
 - .claude/local/last-conversation
+
+## Shared Data
+### Rendering Side
+../Rust_Rendering is animating and rendering project using training data produced from this project
+
+### Log
+the issues from rendering project is restored at ../SharedData/log/Rendering or log/Training
+Read the issues and improve the training data quality.

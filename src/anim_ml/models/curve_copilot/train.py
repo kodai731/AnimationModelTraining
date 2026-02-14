@@ -13,6 +13,8 @@ from torch.utils.data import DataLoader
 
 from anim_ml.data.curve_dataset import CurveCopilotDataset
 from anim_ml.models.curve_copilot.model import CurveCopilotConfig, CurveCopilotModel
+from anim_ml.paths import resolve_data_path
+from anim_ml.utils.timing_log import TimingLog
 
 
 @dataclass
@@ -31,6 +33,7 @@ class TrainingConfig:
     weight_decay: float = 0.01
     warmup_epochs: int = 5
     gradient_clip: float = 1.0
+    early_stopping_patience: int = 0
     loss_weights: LossWeights = field(default_factory=LossWeights)
 
 
@@ -83,17 +86,20 @@ def compute_loss(
     confidence: torch.Tensor,
     target: torch.Tensor,
     weights: LossWeights,
+    confidence_targets: torch.Tensor,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     mse = nn.functional.mse_loss
 
     value_loss = mse(prediction[:, 0], target[:, 1])
     tangent_loss = mse(prediction[:, 1:5], target[:, 2:6])
 
-    interp_target = torch.ones(prediction.shape[0], device=prediction.device)
-    interp_loss = nn.functional.binary_cross_entropy_with_logits(prediction[:, 5], interp_target)
+    tangent_magnitude: torch.Tensor = torch.norm(target[:, 2:6], dim=1)  # type: ignore[assignment]
+    interp_target: torch.Tensor = (tangent_magnitude > 0.01).float()  # type: ignore[assignment]
+    interp_loss = nn.functional.binary_cross_entropy_with_logits(
+        prediction[:, 5], interp_target,  # type: ignore[arg-type]
+    )
 
-    confidence_target = torch.ones_like(confidence)
-    confidence_loss = mse(confidence, confidence_target)
+    confidence_loss = mse(confidence, confidence_targets)
 
     total = (
         weights.value * value_loss
@@ -150,14 +156,22 @@ def train_one_epoch(
     num_batches = 0
 
     for step, batch in enumerate(dataloader):
-        context = batch["context_keyframes"].to(device)
-        prop_type = batch["property_type"].to(device)
-        joint_cat = batch["joint_category"].to(device)
-        query_time = batch["query_time"].to(device).squeeze(-1)
-        target = batch["target"].to(device)
+        context = batch["context_keyframes"].to(device, non_blocking=True)
+        prop_type = batch["property_type"].to(device, non_blocking=True)
+        joint_cat = batch["joint_category"].to(device, non_blocking=True)
+        query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
+        target = batch["target"].to(device, non_blocking=True)
+
+        with torch.no_grad():
+            last_context_value = context[:, -1, 1]
+            target_value = target[:, 1]
+            value_distance = torch.abs(target_value - last_context_value)
+            confidence_targets = torch.exp(-value_distance * 5.0).unsqueeze(-1)
 
         prediction, confidence = model(context, prop_type, joint_cat, query_time)
-        loss, metrics = compute_loss(prediction, confidence, target, config.training.loss_weights)
+        loss, metrics = compute_loss(
+            prediction, confidence, target, config.training.loss_weights, confidence_targets,
+        )
 
         optimizer.zero_grad()
         loss.backward()  # type: ignore[no-untyped-call]
@@ -187,14 +201,21 @@ def validate(
     num_batches = 0
 
     for batch in dataloader:
-        context = batch["context_keyframes"].to(device)
-        prop_type = batch["property_type"].to(device)
-        joint_cat = batch["joint_category"].to(device)
-        query_time = batch["query_time"].to(device).squeeze(-1)
-        target = batch["target"].to(device)
+        context = batch["context_keyframes"].to(device, non_blocking=True)
+        prop_type = batch["property_type"].to(device, non_blocking=True)
+        joint_cat = batch["joint_category"].to(device, non_blocking=True)
+        query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
+        target = batch["target"].to(device, non_blocking=True)
+
+        last_context_value = context[:, -1, 1]
+        target_value = target[:, 1]
+        value_distance = torch.abs(target_value - last_context_value)
+        confidence_targets = torch.exp(-value_distance * 5.0).unsqueeze(-1)
 
         prediction, confidence = model(context, prop_type, joint_cat, query_time)
-        _, metrics = compute_loss(prediction, confidence, target, config.training.loss_weights)
+        _, metrics = compute_loss(
+            prediction, confidence, target, config.training.loss_weights, confidence_targets,
+        )
 
         total_loss += metrics["loss/total"]
         num_batches += 1
@@ -242,9 +263,11 @@ def train(config: TrainConfig) -> None:
     model = CurveCopilotModel(config.model).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    train_paths = [Path(p) for p in config.data.train_files]
+    train_paths = [resolve_data_path(p) for p in config.data.train_files]
     train_dataset = CurveCopilotDataset(train_paths, split="train")
     val_dataset = CurveCopilotDataset(train_paths, split=config.data.val_split)
+
+    use_workers = config.data.num_workers > 0
 
     train_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
         train_dataset,
@@ -252,6 +275,7 @@ def train(config: TrainConfig) -> None:
         shuffle=True,
         num_workers=config.data.num_workers,
         pin_memory=device.type == "cuda",
+        persistent_workers=use_workers,
     )
     val_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
         val_dataset,
@@ -259,6 +283,7 @@ def train(config: TrainConfig) -> None:
         shuffle=False,
         num_workers=config.data.num_workers,
         pin_memory=device.type == "cuda",
+        persistent_workers=use_workers,
     )
 
     steps_per_epoch = max(len(train_loader), 1)
@@ -266,39 +291,72 @@ def train(config: TrainConfig) -> None:
         model, config.training, steps_per_epoch,
     )
 
-    checkpoint_dir = Path(config.output.checkpoint_dir)
+    checkpoint_dir = resolve_data_path(config.output.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    timing_log = TimingLog("curve_copilot")
+    print(f"Timing log: {timing_log.path}")
+
     best_val_loss = float("inf")
+    epochs_without_improvement = 0
+    patience = config.training.early_stopping_patience
     all_metrics: dict[str, float] = {}
 
     for epoch in range(1, config.training.epochs + 1):
         print(f"Epoch {epoch}/{config.training.epochs}")
 
-        train_metrics = train_one_epoch(
-            model, train_loader, optimizer, scheduler, config, device, epoch,
-        )
-        val_metrics = validate(model, val_loader, config, device)
+        with TimingLog.measure() as train_time:
+            train_metrics = train_one_epoch(
+                model, train_loader, optimizer, scheduler, config, device, epoch,
+            )
+
+        with TimingLog.measure() as val_time:
+            val_metrics = validate(model, val_loader, config, device)
 
         all_metrics = {**train_metrics, **val_metrics}
         print(f"  train_loss={train_metrics['loss/train']:.4f}"
               f"  val_loss={val_metrics['loss/val']:.4f}")
 
+        checkpoint_time_sec = 0.0
+
         if val_metrics["loss/val"] < best_val_loss:
             best_val_loss = val_metrics["loss/val"]
-            save_checkpoint(
-                model, optimizer, scheduler, epoch, all_metrics,
-                checkpoint_dir / "best.pt",
-            )
+            epochs_without_improvement = 0
+            with TimingLog.measure() as ckpt_time:
+                save_checkpoint(
+                    model, optimizer, scheduler, epoch, all_metrics,
+                    checkpoint_dir / "best.pt",
+                )
+            checkpoint_time_sec += ckpt_time["elapsed"]
+        else:
+            epochs_without_improvement += 1
 
         if epoch % config.output.save_every_epochs == 0:
-            save_checkpoint(
-                model, optimizer, scheduler, epoch, all_metrics,
-                checkpoint_dir / f"epoch_{epoch}.pt",
-            )
+            with TimingLog.measure() as ckpt_time:
+                save_checkpoint(
+                    model, optimizer, scheduler, epoch, all_metrics,
+                    checkpoint_dir / f"epoch_{epoch}.pt",
+                )
+            checkpoint_time_sec += ckpt_time["elapsed"]
+
+        timing_log.write_epoch(epoch, {
+            "train_sec": round(train_time["elapsed"], 3),
+            "val_sec": round(val_time["elapsed"], 3),
+            "checkpoint_sec": round(checkpoint_time_sec, 3),
+            "total_sec": round(
+                train_time["elapsed"] + val_time["elapsed"] + checkpoint_time_sec, 3,
+            ),
+            "num_steps": steps_per_epoch,
+            "train_loss": round(train_metrics["loss/train"], 6),
+            "val_loss": round(val_metrics["loss/val"], 6),
+        })
+
+        if patience > 0 and epochs_without_improvement >= patience:
+            print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)")
+            break
 
     save_checkpoint(
-        model, optimizer, scheduler, config.training.epochs, all_metrics,
+        model, optimizer, scheduler, epoch, all_metrics,
         checkpoint_dir / "last.pt",
     )
     print(f"Training complete. Best val loss: {best_val_loss:.4f}")

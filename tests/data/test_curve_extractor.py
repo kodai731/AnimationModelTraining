@@ -106,3 +106,25 @@ class TestEdgeCases:
         )
         samples = extract_curve_samples(motion)
         assert samples == []
+
+
+@pytest.mark.unit
+class TestPerCurveNormalization:
+    def test_curve_mean_std_present(self) -> None:
+        motion = parse_bvh(FIXTURES_DIR / "simple.bvh")
+        samples = extract_curve_samples(motion)
+        for s in samples:
+            assert hasattr(s, "curve_mean")
+            assert hasattr(s, "curve_std")
+            assert s.curve_std > 0
+
+    def test_normalized_values_centered(self) -> None:
+        motion = parse_bvh(FIXTURES_DIR / "simple.bvh")
+        samples = extract_curve_samples(motion)
+
+        for s in samples:
+            active_rows = s.context_keyframes[s.context_keyframes[:, 0] > 0]
+            if len(active_rows) < 2:
+                continue
+            values = active_rows[:, 1]
+            assert abs(float(np.mean(values))) < 5.0

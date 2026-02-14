@@ -13,6 +13,7 @@ training:
   weight_decay: 0.01
   warmup_epochs: 5
   gradient_clip: 1.0
+  early_stopping_patience: 15
   loss_weights:
     value: 1.0
     tangent: 0.5
@@ -21,8 +22,7 @@ training:
 
 data:
   train_files:
-    - data/processed/cmu_curves.h5
-    - data/processed/100style_curves.h5
+    - data/processed/all_curves.h5
   val_split: val
   num_workers: 4
 

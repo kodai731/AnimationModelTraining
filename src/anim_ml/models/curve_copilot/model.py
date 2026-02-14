@@ -105,7 +105,7 @@ class CurveCopilotModel(nn.Module):
 
         last_token = self.output_norm(x)[:, -1, :]
         prediction = self.prediction_head(last_token)
-        confidence = torch.sigmoid(self.confidence_head(last_token))
+        confidence = torch.sigmoid(self.confidence_head(last_token.detach()))
 
         return prediction, confidence
 

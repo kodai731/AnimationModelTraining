@@ -17,14 +17,14 @@ training:
   weight_decay: 0.01
   warmup_epochs: 5
   gradient_clip: 1.0
+  early_stopping_patience: 15
   loss_weights:
     rotation: 1.0
     confidence: 0.2
 
 data:
   train_files:
-    - data/processed/cmu_rig.h5
-    - data/processed/100style_rig.h5
+    - data/processed/all_rig.h5
   val_split: val
   num_workers: 4
 

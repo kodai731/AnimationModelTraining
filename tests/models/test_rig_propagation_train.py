@@ -257,6 +257,8 @@ class TestConfigLoading:
         assert config.training.loss_weights.confidence == 0.2
         assert config.data.val_split == "val"
         assert config.output.checkpoint_dir == "runs/rig_propagation"
+        assert len(config.data.train_files) >= 1
+        assert all(f.endswith(".h5") for f in config.data.train_files)
 
 
 @pytest.mark.unit

@@ -95,6 +95,8 @@ def save_hdf5(splits: dict[str, list[CurveSample]], output_path: Path) -> None:
             query_time = np.array([s.query_time for s in samples], dtype=np.float32)
             clip_dur = np.array([s.clip_duration for s in samples], dtype=np.float32)
             joint_depth = np.array([s.joint_depth for s in samples], dtype=np.int32)
+            curve_mean = np.array([s.curve_mean for s in samples], dtype=np.float32)
+            curve_std = np.array([s.curve_std for s in samples], dtype=np.float32)
 
             grp.create_dataset("context_keyframes", data=context)
             grp.create_dataset("target", data=target)
@@ -103,6 +105,8 @@ def save_hdf5(splits: dict[str, list[CurveSample]], output_path: Path) -> None:
             grp.create_dataset("query_time", data=query_time)
             grp.create_dataset("clip_duration", data=clip_dur)
             grp.create_dataset("joint_depth", data=joint_depth)
+            grp.create_dataset("curve_mean", data=curve_mean)
+            grp.create_dataset("curve_std", data=curve_std)
 
             logger.info("Split '%s': %d samples", split_name, n)
 
@@ -138,12 +142,14 @@ def run_pipeline(dataset: str, raw_dir: Path, output_dir: Path, limit: int | Non
 
 
 def main() -> None:
+    from anim_ml.paths import get_processed_data_dir, get_raw_data_dir
+
     parser = argparse.ArgumentParser(description="Prepare curve training dataset")
     parser.add_argument(
         "--dataset", choices=["cmu", "100style", "all"], default="all",
     )
-    parser.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
-    parser.add_argument("--output-dir", type=Path, default=Path("data/processed"))
+    parser.add_argument("--raw-dir", type=Path, default=get_raw_data_dir())
+    parser.add_argument("--output-dir", type=Path, default=get_processed_data_dir())
     parser.add_argument("--limit", type=int, default=None, help="Limit number of BVH files")
     args = parser.parse_args()
 

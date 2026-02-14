@@ -88,12 +88,14 @@ def run_pipeline(dataset: str, raw_dir: Path, output_dir: Path, limit: int | Non
 
 
 def main() -> None:
+    from anim_ml.paths import get_processed_data_dir, get_raw_data_dir
+
     parser = argparse.ArgumentParser(description="Prepare rig propagation training dataset")
     parser.add_argument(
         "--dataset", choices=["cmu", "100style", "all"], default="all",
     )
-    parser.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
-    parser.add_argument("--output-dir", type=Path, default=Path("data/processed"))
+    parser.add_argument("--raw-dir", type=Path, default=get_raw_data_dir())
+    parser.add_argument("--output-dir", type=Path, default=get_processed_data_dir())
     parser.add_argument("--limit", type=int, default=None, help="Limit number of BVH files")
     args = parser.parse_args()
 

@@ -23,6 +23,8 @@ class CurveSample:
     query_time: float
     clip_duration: float
     joint_depth: int
+    curve_mean: float
+    curve_std: float
 
 
 CONTEXT_LENGTH = 8
@@ -90,6 +92,7 @@ def extract_curve_samples(
                 joint_category=category,
                 clip_duration=duration,
                 joint_depth=depth,
+                scale=scale,
             )
             samples.extend(channel_samples)
 
@@ -157,6 +160,7 @@ def _generate_sliding_window_samples(
     joint_category: int,
     clip_duration: float,
     joint_depth: int,
+    scale: float,
 ) -> list[CurveSample]:
     if len(bezier_keyframes) < 2:
         return []
@@ -168,26 +172,30 @@ def _generate_sliding_window_samples(
         context_start = max(0, target_idx - CONTEXT_LENGTH)
         context_kfs = bezier_keyframes[context_start:target_idx]
 
+        context_values = [kf.value for kf in context_kfs]
+        curve_mean = float(np.mean(context_values))
+        curve_std = float(max(np.std(context_values), 1e-6))
+
         context_array = np.zeros((CONTEXT_LENGTH, 6), dtype=np.float32)
         offset = CONTEXT_LENGTH - len(context_kfs)
 
         for i, kf in enumerate(context_kfs):
             row = offset + i
             context_array[row, 0] = kf.time / time_scale
-            context_array[row, 1] = kf.value
+            context_array[row, 1] = (kf.value - curve_mean) / curve_std
             context_array[row, 2] = kf.tangent_in[0] / time_scale
-            context_array[row, 3] = kf.tangent_in[1]
+            context_array[row, 3] = kf.tangent_in[1] / curve_std
             context_array[row, 4] = kf.tangent_out[0] / time_scale
-            context_array[row, 5] = kf.tangent_out[1]
+            context_array[row, 5] = kf.tangent_out[1] / curve_std
 
         target_kf = bezier_keyframes[target_idx]
         target_array = np.array([
             target_kf.time / time_scale,
-            target_kf.value,
+            (target_kf.value - curve_mean) / curve_std,
             target_kf.tangent_in[0] / time_scale,
-            target_kf.tangent_in[1],
+            target_kf.tangent_in[1] / curve_std,
             target_kf.tangent_out[0] / time_scale,
-            target_kf.tangent_out[1],
+            target_kf.tangent_out[1] / curve_std,
         ], dtype=np.float32)
 
         samples.append(CurveSample(
@@ -198,6 +206,8 @@ def _generate_sliding_window_samples(
             query_time=float(target_kf.time / time_scale),
             clip_duration=clip_duration,
             joint_depth=joint_depth,
+            curve_mean=curve_mean * scale,
+            curve_std=curve_std * scale,
         ))
 
     return samples

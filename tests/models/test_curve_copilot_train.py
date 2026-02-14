@@ -57,6 +57,14 @@ def _create_test_hdf5(tmp_path: Path) -> Path:
                 "query_time",
                 data=np.array([s.query_time for s in samples], dtype=np.float32),
             )
+            grp.create_dataset(
+                "curve_mean",
+                data=np.array([s.curve_mean for s in samples], dtype=np.float32),
+            )
+            grp.create_dataset(
+                "curve_std",
+                data=np.array([s.curve_std for s in samples], dtype=np.float32),
+            )
 
     return hdf5_path
 
@@ -86,8 +94,9 @@ class TestComputeLoss:
         confidence = torch.rand(4, 1, requires_grad=True)
         target = torch.randn(4, 6)
         weights = LossWeights()
+        confidence_targets = torch.rand(4, 1)
 
-        loss, metrics = compute_loss(prediction, confidence, target, weights)
+        loss, metrics = compute_loss(prediction, confidence, target, weights, confidence_targets)
 
         assert loss.shape == ()
         assert loss.requires_grad
@@ -99,8 +108,9 @@ class TestComputeLoss:
         target = torch.tensor([[0.5, 1.0, 0.1, 0.2, 0.3, 0.4]])
         prediction = torch.tensor([[1.0, 0.1, 0.2, 0.3, 0.4, 100.0]])
         confidence = torch.ones(1, 1)
+        confidence_targets = torch.ones(1, 1)
 
-        _, metrics = compute_loss(prediction, confidence, target, LossWeights())
+        _, metrics = compute_loss(prediction, confidence, target, LossWeights(), confidence_targets)
 
         assert metrics["loss/value"] < 1e-6
         assert metrics["loss/tangent"] < 1e-6
@@ -250,6 +260,8 @@ class TestConfigLoading:
         assert config.training.loss_weights.value == 1.0
         assert config.data.val_split == "val"
         assert config.output.checkpoint_dir == "runs/curve_copilot"
+        assert len(config.data.train_files) >= 1
+        assert all(f.endswith(".h5") for f in config.data.train_files)
 
 
 @pytest.mark.unit

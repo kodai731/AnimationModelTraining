@@ -8,10 +8,27 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-CMU_BVH_URL = "https://sites.google.com/a/cgspeed.com/cgspeed/motion-capture"
-CMU_MIRROR_BASE = "http://mocap.cs.cmu.edu/subjects"
+CODEWELT_BASE = "https://codewelt.com/dl/cmuconvert"
 
-CMU_SUBJECT_RANGES = list(range(1, 145))
+CMU_ZIP_FILES = [
+    "cmuconvert-mb2-01-09.zip",
+    "cmuconvert-mb2-10-14.zip",
+    "cmuconvert-mb2-15-19.zip",
+    "cmuconvert-mb2-20-29.zip",
+    "cmuconvert-mb2-30-34.zip",
+    "cmuconvert-mb2-35-39.zip",
+    "cmuconvert-mb2-40-45.zip",
+    "cmuconvert-mb2-46-56.zip",
+    "cmuconvert-mb2-60-75.zip",
+    "cmuconvert-mb2-76-80.zip",
+    "cmuconvert-mb2-81-85.zip",
+    "cmuconvert-mb2-86-94.zip",
+    "cmuconvert-mb2-102-111.zip",
+    "cmuconvert-mb2-113-128.zip",
+    "cmuconvert-mb2-131-135.zip",
+    "cmuconvert-mb2-136-140.zip",
+    "cmuconvert-mb2-141-144.zip",
+]
 
 
 def download_file(url: str, dest: Path) -> bool:
@@ -30,12 +47,18 @@ def download_file(url: str, dest: Path) -> bool:
             logger.info("Resuming %s from %d bytes", dest.name, existing_size)
 
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=60) as response, open(tmp, "ab") as f:
+        with urllib.request.urlopen(req, timeout=120) as response, open(tmp, "ab") as f:
+            total = response.headers.get("Content-Length")
+            downloaded = 0
             while True:
                 chunk = response.read(8192)
                 if not chunk:
                     break
                 f.write(chunk)
+                downloaded += len(chunk)
+                if total and downloaded % (1024 * 1024) < 8192:
+                    pct = downloaded / int(total) * 100
+                    logger.info("  %s: %.1f%%", dest.name, pct)
 
         tmp.rename(dest)
         logger.info("Downloaded: %s", dest.name)
@@ -60,12 +83,11 @@ def download_cmu(output_dir: Path, limit: int | None = None) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     all_bvh: list[Path] = []
 
-    subjects = CMU_SUBJECT_RANGES[:limit] if limit else CMU_SUBJECT_RANGES
+    zips = CMU_ZIP_FILES[:limit] if limit else CMU_ZIP_FILES
 
-    for subject_id in subjects:
-        subject_str = f"{subject_id:02d}"
-        url = f"{CMU_MIRROR_BASE}/{subject_str}/{subject_str}.zip"
-        zip_path = output_dir / "zips" / f"cmu_{subject_str}.zip"
+    for zip_name in zips:
+        url = f"{CODEWELT_BASE}/{zip_name}"
+        zip_path = output_dir / "zips" / zip_name
 
         if not download_file(url, zip_path):
             continue
@@ -73,16 +95,20 @@ def download_cmu(output_dir: Path, limit: int | None = None) -> list[Path]:
         bvh_dir = output_dir / "bvh"
         extracted = extract_zip(zip_path, bvh_dir)
         all_bvh.extend(extracted)
-        logger.info("Subject %s: %d BVH files", subject_str, len(extracted))
+        logger.info("%s: %d BVH files extracted", zip_name, len(extracted))
 
     logger.info("Total CMU BVH files: %d", len(all_bvh))
     return all_bvh
 
 
 def main() -> None:
+    from anim_ml.paths import get_raw_data_dir
+
     parser = argparse.ArgumentParser(description="Download CMU MoCap BVH files")
-    parser.add_argument("--output-dir", type=Path, default=Path("data/raw/cmu"))
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of subjects")
+    parser.add_argument("--output-dir", type=Path, default=get_raw_data_dir() / "cmu")
+    parser.add_argument(
+        "--limit", type=int, default=None, help="Limit number of zip archives",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")

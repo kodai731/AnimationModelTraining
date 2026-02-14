@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import os
+from typing import TYPE_CHECKING
+
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import h5py  # type: ignore[import-untyped]
 import numpy as np
@@ -13,67 +16,65 @@ if TYPE_CHECKING:
 
 class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
     def __init__(self, hdf5_paths: list[Path], split: str = "train") -> None:
-        self._files: list[h5py.File] = []
-        self._lengths: list[int] = []
-        self._cumulative: list[int] = []
+        context_chunks: list[torch.Tensor] = []
+        target_chunks: list[torch.Tensor] = []
+        prop_type_chunks: list[torch.Tensor] = []
+        joint_cat_chunks: list[torch.Tensor] = []
+        query_time_chunks: list[torch.Tensor] = []
 
-        cumsum = 0
         for path in hdf5_paths:
-            f = h5py.File(path, "r")
-            if split not in f:
-                f.close()
-                continue
+            with h5py.File(path, "r") as f:
+                if split not in f:
+                    continue
+                grp = f[split]
+                context_chunks.append(torch.from_numpy(np.array(grp["context_keyframes"], dtype=np.float32)))
+                target_chunks.append(torch.from_numpy(np.array(grp["target"], dtype=np.float32)))
+                prop_type_chunks.append(torch.from_numpy(np.array(grp["property_type"], dtype=np.int64)))
+                joint_cat_chunks.append(torch.from_numpy(np.array(grp["joint_category"], dtype=np.int64)))
+                query_time_chunks.append(torch.from_numpy(np.array(grp["query_time"], dtype=np.float32)))
 
-            self._files.append(f)
-            grp: Any = f[split]
-            n: int = grp["context_keyframes"].shape[0]
-            self._lengths.append(n)
-            cumsum += n
-            self._cumulative.append(cumsum)
+        if context_chunks:
+            self._context = torch.cat(context_chunks)
+            self._target = torch.cat(target_chunks)
+            self._prop_type = torch.cat(prop_type_chunks)
+            self._joint_cat = torch.cat(joint_cat_chunks)
+            self._query_time = torch.cat(query_time_chunks)
+            self._move_to_shared_memory()
+        else:
+            self._context = torch.empty(0)
+            self._target = torch.empty(0)
+            self._prop_type = torch.empty(0, dtype=torch.int64)
+            self._joint_cat = torch.empty(0, dtype=torch.int64)
+            self._query_time = torch.empty(0)
 
-        self._split = split
-        self._total: int = cumsum
+    def _move_to_shared_memory(self) -> None:
+        if len(self._context) == 0:
+            return
+        self._context.share_memory_()
+        self._target.share_memory_()
+        self._prop_type.share_memory_()
+        self._joint_cat.share_memory_()
+        self._query_time.share_memory_()
 
     def __len__(self) -> int:
-        return self._total
+        return len(self._context)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        if index < 0 or index >= self._total:
-            msg = f"Index {index} out of range [0, {self._total})"
+        if index < 0 or index >= len(self._context):
+            msg = f"Index {index} out of range [0, {len(self._context)})"
             raise IndexError(msg)
 
-        file_idx, local_idx = self._resolve_index(index)
-        grp: Any = self._files[file_idx][self._split]
-
-        context: np.ndarray = np.array(grp["context_keyframes"][local_idx], dtype=np.float32)
-        target: np.ndarray = np.array(grp["target"][local_idx], dtype=np.float32)
-        prop_type: int = int(grp["property_type"][local_idx])
-        joint_cat: int = int(grp["joint_category"][local_idx])
-        query_time: float = float(grp["query_time"][local_idx])
-
-        context_tensor: torch.Tensor = torch.from_numpy(context)  # type: ignore[no-any-return]
-        target_tensor: torch.Tensor = torch.from_numpy(target)  # type: ignore[no-any-return]
-
         return {
-            "context_keyframes": context_tensor,
-            "target": target_tensor,
-            "property_type": torch.tensor(prop_type, dtype=torch.int64),
-            "joint_category": torch.tensor(joint_cat, dtype=torch.int64),
-            "query_time": torch.tensor([query_time], dtype=torch.float32),
+            "context_keyframes": self._context[index],
+            "target": self._target[index],
+            "property_type": self._prop_type[index],
+            "joint_category": self._joint_cat[index],
+            "query_time": self._query_time[index].unsqueeze(0),
         }
 
     def close(self) -> None:
-        for f in self._files:
-            f.close()
-        self._files.clear()
-        self._lengths.clear()
-        self._cumulative.clear()
-        self._total = 0
-
-    def _resolve_index(self, index: int) -> tuple[int, int]:
-        for file_idx, cum in enumerate(self._cumulative):
-            if index < cum:
-                prev = self._cumulative[file_idx - 1] if file_idx > 0 else 0
-                return file_idx, index - prev
-        msg = f"Index {index} out of range"
-        raise IndexError(msg)
+        self._context = torch.empty(0)
+        self._target = torch.empty(0)
+        self._prop_type = torch.empty(0, dtype=torch.int64)
+        self._joint_cat = torch.empty(0, dtype=torch.int64)
+        self._query_time = torch.empty(0)

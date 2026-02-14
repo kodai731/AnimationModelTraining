@@ -77,8 +77,9 @@ def create_model(config: ServerConfig) -> TextToMotionModel:
         return MockTextToMotionModel()
 
     if config.model_name == "light_t2m":
+        from anim_ml.paths import resolve_data_path
         from anim_ml.server.model_light_t2m import LightT2MModel
-        return LightT2MModel(config.model_checkpoint)
+        return LightT2MModel(str(resolve_data_path(config.model_checkpoint)))
 
     msg = f"Unknown model: {config.model_name}"
     raise ValueError(msg)
