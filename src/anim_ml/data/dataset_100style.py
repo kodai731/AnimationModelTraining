@@ -90,4 +90,7 @@ def map_100style_to_smpl(motion: MotionData) -> MotionData | None:
 
 
 def find_100style_bvh_files(data_dir: Path) -> list[Path]:
-    return sorted(data_dir.rglob("*.bvh"))
+    return sorted(
+        p for p in data_dir.rglob("*.bvh")
+        if "__MACOSX" not in p.parts and not p.name.startswith("._")
+    )

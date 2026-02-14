@@ -33,6 +33,7 @@ TARGET_FPS = 30.0
 POSITION_EPSILON = 0.01
 ROTATION_EPSILON = 0.5
 BEZIER_MAX_ERROR = 0.005
+MIN_CURVE_STD = 0.01
 
 
 def extract_curve_samples(
@@ -174,7 +175,12 @@ def _generate_sliding_window_samples(
 
         context_values = [kf.value for kf in context_kfs]
         curve_mean = float(np.mean(context_values))
-        curve_std = float(max(np.std(context_values), 1e-6))
+        raw_std = float(np.std(context_values))
+
+        if raw_std < MIN_CURVE_STD:
+            continue
+
+        curve_std = raw_std
 
         context_array = np.zeros((CONTEXT_LENGTH, 6), dtype=np.float32)
         offset = CONTEXT_LENGTH - len(context_kfs)
