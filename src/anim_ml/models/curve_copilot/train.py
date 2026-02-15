@@ -301,65 +301,74 @@ def train(config: TrainConfig) -> None:
     epochs_without_improvement = 0
     patience = config.training.early_stopping_patience
     all_metrics: dict[str, float] = {}
+    epoch = 0
 
-    for epoch in range(1, config.training.epochs + 1):
-        print(f"Epoch {epoch}/{config.training.epochs}")
+    try:
+        for epoch in range(1, config.training.epochs + 1):
+            print(f"Epoch {epoch}/{config.training.epochs}")
 
-        with TimingLog.measure() as train_time:
-            train_metrics = train_one_epoch(
-                model, train_loader, optimizer, scheduler, config, device, epoch,
-            )
-
-        with TimingLog.measure() as val_time:
-            val_metrics = validate(model, val_loader, config, device)
-
-        all_metrics = {**train_metrics, **val_metrics}
-        print(f"  train_loss={train_metrics['loss/train']:.4f}"
-              f"  val_loss={val_metrics['loss/val']:.4f}")
-
-        checkpoint_time_sec = 0.0
-
-        if val_metrics["loss/val"] < best_val_loss:
-            best_val_loss = val_metrics["loss/val"]
-            epochs_without_improvement = 0
-            with TimingLog.measure() as ckpt_time:
-                save_checkpoint(
-                    model, optimizer, scheduler, epoch, all_metrics,
-                    checkpoint_dir / "best.pt",
+            with TimingLog.measure() as train_time:
+                train_metrics = train_one_epoch(
+                    model, train_loader, optimizer, scheduler, config, device, epoch,
                 )
-            checkpoint_time_sec += ckpt_time["elapsed"]
-        else:
-            epochs_without_improvement += 1
 
-        if epoch % config.output.save_every_epochs == 0:
-            with TimingLog.measure() as ckpt_time:
-                save_checkpoint(
-                    model, optimizer, scheduler, epoch, all_metrics,
-                    checkpoint_dir / f"epoch_{epoch}.pt",
-                )
-            checkpoint_time_sec += ckpt_time["elapsed"]
+            with TimingLog.measure() as val_time:
+                val_metrics = validate(model, val_loader, config, device)
 
-        timing_log.write_epoch(epoch, {
-            "train_sec": round(train_time["elapsed"], 3),
-            "val_sec": round(val_time["elapsed"], 3),
-            "checkpoint_sec": round(checkpoint_time_sec, 3),
-            "total_sec": round(
-                train_time["elapsed"] + val_time["elapsed"] + checkpoint_time_sec, 3,
-            ),
-            "num_steps": steps_per_epoch,
-            "train_loss": round(train_metrics["loss/train"], 6),
-            "val_loss": round(val_metrics["loss/val"], 6),
-        })
+            all_metrics = {**train_metrics, **val_metrics}
+            print(f"  train_loss={train_metrics['loss/train']:.4f}"
+                  f"  val_loss={val_metrics['loss/val']:.4f}")
 
-        if patience > 0 and epochs_without_improvement >= patience:
-            print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)")
-            break
+            checkpoint_time_sec = 0.0
 
-    save_checkpoint(
-        model, optimizer, scheduler, epoch, all_metrics,
-        checkpoint_dir / "last.pt",
-    )
-    print(f"Training complete. Best val loss: {best_val_loss:.4f}")
+            if val_metrics["loss/val"] < best_val_loss:
+                best_val_loss = val_metrics["loss/val"]
+                epochs_without_improvement = 0
+                with TimingLog.measure() as ckpt_time:
+                    save_checkpoint(
+                        model, optimizer, scheduler, epoch, all_metrics,
+                        checkpoint_dir / "best.pt",
+                    )
+                checkpoint_time_sec += ckpt_time["elapsed"]
+            else:
+                epochs_without_improvement += 1
+
+            if epoch % config.output.save_every_epochs == 0:
+                with TimingLog.measure() as ckpt_time:
+                    save_checkpoint(
+                        model, optimizer, scheduler, epoch, all_metrics,
+                        checkpoint_dir / f"epoch_{epoch}.pt",
+                    )
+                checkpoint_time_sec += ckpt_time["elapsed"]
+
+            timing_log.write_epoch(epoch, {
+                "train_sec": round(train_time["elapsed"], 3),
+                "val_sec": round(val_time["elapsed"], 3),
+                "checkpoint_sec": round(checkpoint_time_sec, 3),
+                "total_sec": round(
+                    train_time["elapsed"] + val_time["elapsed"] + checkpoint_time_sec, 3,
+                ),
+                "num_steps": steps_per_epoch,
+                "train_loss": round(train_metrics["loss/train"], 6),
+                "val_loss": round(val_metrics["loss/val"], 6),
+            })
+
+            if patience > 0 and epochs_without_improvement >= patience:
+                print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)")
+                break
+
+    except KeyboardInterrupt:
+        print(f"\nTraining interrupted at epoch {epoch}.")
+
+    if epoch > 0:
+        save_checkpoint(
+            model, optimizer, scheduler, epoch, all_metrics,
+            checkpoint_dir / "last.pt",
+        )
+        print(f"Saved last.pt (epoch {epoch}).")
+
+    if best_val_loss < float("inf"):
+        print(f"Best val loss: {best_val_loss:.4f} (best.pt)")
 
 
 def main() -> None:
