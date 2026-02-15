@@ -7,7 +7,14 @@
       "WebFetch(domain:api.github.com)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:developer.nvidia.com)",
-      "WebFetch(domain:docs.pytorch.org)"
+      "WebFetch(domain:docs.pytorch.org)",
+      "WebFetch(domain:www.research.autodesk.com)",
+      "WebFetch(domain:blogs.autodesk.com)",
+      "WebFetch(domain:www.autodesk.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:help.autodesk.com)",
+      "Bash(find:*)",
+      "Bash(xargs:*)"
     ]
   }
 }
