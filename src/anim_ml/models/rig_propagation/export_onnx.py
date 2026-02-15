@@ -47,20 +47,18 @@ def export_to_onnx(
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    batch = torch.export.Dim("batch", min=1, max=256)
-    dynamic_shapes = {
-        "joint_features": {0: batch},
-        "joint_types": {0: batch},
-    }
+    input_names = ["joint_features", "joint_types"]
+    output_names = ["rotation_deltas", "confidence"]
+    dynamic_axes = {name: {0: "batch"} for name in input_names + output_names}
 
     torch.onnx.export(  # type: ignore[reportUnknownMemberType]
         model,
         (dummy_features, dummy_types),
         str(output_path),
         opset_version=opset_version,
-        input_names=["joint_features", "joint_types"],
-        output_names=["rotation_deltas", "confidence"],
-        dynamic_shapes=dynamic_shapes,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
     )
 
 

@@ -48,22 +48,18 @@ def export_to_onnx(
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    batch = torch.export.Dim("batch", min=1, max=256)
-    dynamic_shapes = {
-        "context_keyframes": {0: batch},
-        "property_type": {0: batch},
-        "joint_category": {0: batch},
-        "query_time": {0: batch},
-    }
+    input_names = ["context_keyframes", "property_type", "joint_category", "query_time"]
+    output_names = ["prediction", "confidence"]
+    dynamic_axes = {name: {0: "batch"} for name in input_names + output_names}
 
     torch.onnx.export(  # type: ignore[reportUnknownMemberType]
         model,
         (dummy_context, dummy_prop, dummy_joint, dummy_time),
         str(output_path),
         opset_version=opset_version,
-        input_names=["context_keyframes", "property_type", "joint_category", "query_time"],
-        output_names=["prediction", "confidence"],
-        dynamic_shapes=dynamic_shapes,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
     )
 
 

@@ -255,8 +255,8 @@ class TestConfigLoading:
 
         assert config.model.d_model == 128
         assert config.model.n_heads == 4
-        assert config.training.batch_size == 256
-        assert config.training.learning_rate == 1e-4
+        assert config.training.batch_size == 2048
+        assert config.training.learning_rate == 2.83e-4
         assert config.training.loss_weights.value == 1.0
         assert config.data.val_split == "val"
         assert config.output.checkpoint_dir == "runs/curve_copilot"

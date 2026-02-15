@@ -26,6 +26,9 @@ server = [
     "grpcio-tools>=1.64",
     "protobuf>=5.27",
 ]
+dml = [
+    "torch-directml>=0.2.5.dev240914",
+]
 dev = [
     "pytest>=8.2",
     "ruff>=0.5",

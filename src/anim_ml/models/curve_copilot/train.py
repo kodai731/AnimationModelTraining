@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from anim_ml.data.curve_dataset import CurveCopilotDataset
 from anim_ml.models.curve_copilot.model import CurveCopilotConfig, CurveCopilotModel
 from anim_ml.paths import resolve_data_path
+from anim_ml.utils.device import detect_training_device, supports_pin_memory
 from anim_ml.utils.timing_log import TimingLog
 
 
@@ -230,6 +231,7 @@ def save_checkpoint(
     epoch: int,
     metrics: dict[str, float],
     path: str | Path,
+    best_val_loss: float = float("inf"),
 ) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save({
@@ -238,6 +240,7 @@ def save_checkpoint(
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "metrics": metrics,
+        "best_val_loss": best_val_loss,
         "config": {
             "d_model": model.config.d_model,
             "n_heads": model.config.n_heads,
@@ -256,8 +259,12 @@ def load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
     return torch.load(path, map_location=device, weights_only=False)  # type: ignore[no-any-return]
 
 
-def train(config: TrainConfig) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def train(
+    config: TrainConfig,
+    resume_path: str | Path | None = None,
+    device_override: str | None = None,
+) -> None:
+    device = detect_training_device(device_override)
     print(f"Using device: {device}")
 
     model = CurveCopilotModel(config.model).to(device)
@@ -268,13 +275,14 @@ def train(config: TrainConfig) -> None:
     val_dataset = CurveCopilotDataset(train_paths, split=config.data.val_split)
 
     use_workers = config.data.num_workers > 0
+    pin_memory = supports_pin_memory(device)
 
     train_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
         train_dataset,
         batch_size=config.training.batch_size,
         shuffle=True,
         num_workers=config.data.num_workers,
-        pin_memory=device.type == "cuda",
+        pin_memory=pin_memory,
         persistent_workers=use_workers,
     )
     val_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
@@ -282,7 +290,7 @@ def train(config: TrainConfig) -> None:
         batch_size=config.training.batch_size,
         shuffle=False,
         num_workers=config.data.num_workers,
-        pin_memory=device.type == "cuda",
+        pin_memory=pin_memory,
         persistent_workers=use_workers,
     )
 
@@ -301,10 +309,21 @@ def train(config: TrainConfig) -> None:
     epochs_without_improvement = 0
     patience = config.training.early_stopping_patience
     all_metrics: dict[str, float] = {}
-    epoch = 0
+    start_epoch = 1
+
+    if resume_path is not None:
+        ckpt = load_checkpoint(resume_path, device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        print(f"Resumed from epoch {ckpt['epoch']} (best_val_loss={best_val_loss:.4f})")
+
+    epoch = start_epoch - 1
 
     try:
-        for epoch in range(1, config.training.epochs + 1):
+        for epoch in range(start_epoch, config.training.epochs + 1):
             print(f"Epoch {epoch}/{config.training.epochs}")
 
             with TimingLog.measure() as train_time:
@@ -327,7 +346,7 @@ def train(config: TrainConfig) -> None:
                 with TimingLog.measure() as ckpt_time:
                     save_checkpoint(
                         model, optimizer, scheduler, epoch, all_metrics,
-                        checkpoint_dir / "best.pt",
+                        checkpoint_dir / "best.pt", best_val_loss,
                     )
                 checkpoint_time_sec += ckpt_time["elapsed"]
             else:
@@ -337,7 +356,7 @@ def train(config: TrainConfig) -> None:
                 with TimingLog.measure() as ckpt_time:
                     save_checkpoint(
                         model, optimizer, scheduler, epoch, all_metrics,
-                        checkpoint_dir / f"epoch_{epoch}.pt",
+                        checkpoint_dir / f"epoch_{epoch}.pt", best_val_loss,
                     )
                 checkpoint_time_sec += ckpt_time["elapsed"]
 
@@ -363,7 +382,7 @@ def train(config: TrainConfig) -> None:
     if epoch > 0:
         save_checkpoint(
             model, optimizer, scheduler, epoch, all_metrics,
-            checkpoint_dir / "last.pt",
+            checkpoint_dir / "last.pt", best_val_loss,
         )
         print(f"Saved last.pt (epoch {epoch}).")
 
@@ -373,11 +392,13 @@ def train(config: TrainConfig) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Curve Copilot model")
-    parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
-    train(config)
+    train(config, resume_path=args.resume, device_override=args.device)
 
 
 if __name__ == "__main__":
