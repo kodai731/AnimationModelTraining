@@ -232,6 +232,7 @@ def save_checkpoint(
     metrics: dict[str, float],
     path: str | Path,
     best_val_loss: float = float("inf"),
+    epochs_without_improvement: int = 0,
 ) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save({
@@ -241,6 +242,7 @@ def save_checkpoint(
         "scheduler_state_dict": scheduler.state_dict(),
         "metrics": metrics,
         "best_val_loss": best_val_loss,
+        "epochs_without_improvement": epochs_without_improvement,
         "config": {
             "d_model": model.config.d_model,
             "n_heads": model.config.n_heads,
@@ -318,6 +320,7 @@ def train(
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_epoch = ckpt["epoch"] + 1
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        epochs_without_improvement = ckpt.get("epochs_without_improvement", 0)
         print(f"Resumed from epoch {ckpt['epoch']} (best_val_loss={best_val_loss:.4f})")
 
     epoch = start_epoch - 1
@@ -347,6 +350,7 @@ def train(
                     save_checkpoint(
                         model, optimizer, scheduler, epoch, all_metrics,
                         checkpoint_dir / "best.pt", best_val_loss,
+                        epochs_without_improvement,
                     )
                 checkpoint_time_sec += ckpt_time["elapsed"]
             else:
@@ -357,6 +361,7 @@ def train(
                     save_checkpoint(
                         model, optimizer, scheduler, epoch, all_metrics,
                         checkpoint_dir / f"epoch_{epoch}.pt", best_val_loss,
+                        epochs_without_improvement,
                     )
                 checkpoint_time_sec += ckpt_time["elapsed"]
 
@@ -383,6 +388,7 @@ def train(
         save_checkpoint(
             model, optimizer, scheduler, epoch, all_metrics,
             checkpoint_dir / "last.pt", best_val_loss,
+            epochs_without_improvement,
         )
         print(f"Saved last.pt (epoch {epoch}).")
 
