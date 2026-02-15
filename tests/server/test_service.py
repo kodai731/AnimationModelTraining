@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import tempfile
 from concurrent import futures
 from pathlib import Path
@@ -9,6 +10,8 @@ import pytest
 import yaml
 
 from anim_ml.server.proto import (
+    BEZIER,
+    LINEAR,
     VRM_HUMANOID,
     MotionRequest,
     MotionResponse,
@@ -23,6 +26,7 @@ from anim_ml.server.service import (
     create_model,
     load_server_config,
 )
+from anim_ml.utils.skeleton import SMPL_TO_VRM_MAPPING
 
 
 @pytest.fixture
@@ -98,6 +102,29 @@ class TestGenerateMotion:
         response: MotionResponse = stub.GenerateMotion(request)
         assert len(response.curves) > 0
 
+    def test_small_duration_clamped_to_minimum(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk", duration_seconds=0.1, target_fps=30)
+
+        response: MotionResponse = stub.GenerateMotion(request)
+        assert len(response.curves) > 0
+
+    def test_invalid_fps_error(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk", duration_seconds=2.0, target_fps=24)
+
+        with pytest.raises(grpc.RpcError) as exc_info:
+            stub.GenerateMotion(request)
+
+        assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+
+    def test_fps_60_accepted(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk", duration_seconds=2.0, target_fps=60)
+
+        response: MotionResponse = stub.GenerateMotion(request)
+        assert len(response.curves) > 0
+
     def test_generation_time_reported(self, grpc_channel: grpc.Channel) -> None:
         stub = TextToMotionServiceStub(grpc_channel)
         request = MotionRequest(prompt="walk", duration_seconds=1.0, target_fps=30)
@@ -160,3 +187,90 @@ class TestServerConfig:
         config = ServerConfig(model_name="unknown")
         with pytest.raises(ValueError, match="Unknown model"):
             create_model(config)
+
+
+@pytest.mark.unit
+class TestResponseSpecCompliance:
+    def test_all_bone_names_are_valid_vrm(self, grpc_channel: grpc.Channel) -> None:
+        valid_vrm_names = set(SMPL_TO_VRM_MAPPING.values())
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk forward", duration_seconds=2.0, target_fps=30)
+        response: MotionResponse = stub.GenerateMotion(request)
+
+        for curve in response.curves:
+            assert curve.bone_name in valid_vrm_names, f"Invalid bone: {curve.bone_name}"
+
+    def test_property_types_in_valid_range(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk forward", duration_seconds=2.0, target_fps=30)
+        response: MotionResponse = stub.GenerateMotion(request)
+
+        for curve in response.curves:
+            assert 0 <= curve.property_type <= 5
+
+    def test_keyframes_sorted_ascending(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk forward", duration_seconds=2.0, target_fps=30)
+        response: MotionResponse = stub.GenerateMotion(request)
+
+        for curve in response.curves:
+            times = [kf.time for kf in curve.keyframes]
+            for i in range(1, len(times)):
+                assert times[i] >= times[i - 1]
+
+    def test_minimum_two_keyframes_per_curve(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk forward", duration_seconds=2.0, target_fps=30)
+        response: MotionResponse = stub.GenerateMotion(request)
+
+        for curve in response.curves:
+            assert len(curve.keyframes) >= 2
+
+    def test_no_nan_inf_in_keyframes(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk forward", duration_seconds=2.0, target_fps=30)
+        response: MotionResponse = stub.GenerateMotion(request)
+
+        for curve in response.curves:
+            for kf in curve.keyframes:
+                assert math.isfinite(kf.value), f"Non-finite value in {curve.bone_name}"
+                assert math.isfinite(kf.time)
+                assert math.isfinite(kf.tangent_in_dt)
+                assert math.isfinite(kf.tangent_in_dv)
+                assert math.isfinite(kf.tangent_out_dt)
+                assert math.isfinite(kf.tangent_out_dv)
+
+    def test_root_bone_has_translation_and_rotation(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk forward", duration_seconds=2.0, target_fps=30)
+        response: MotionResponse = stub.GenerateMotion(request)
+
+        hips_props = {c.property_type for c in response.curves if c.bone_name == "hips"}
+        assert 0 in hips_props
+        assert 1 in hips_props
+        assert 2 in hips_props
+        assert 3 in hips_props
+        assert 4 in hips_props
+        assert 5 in hips_props
+
+    def test_interpolation_type_valid(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(prompt="walk forward", duration_seconds=2.0, target_fps=30)
+        response: MotionResponse = stub.GenerateMotion(request)
+
+        for curve in response.curves:
+            for kf in curve.keyframes:
+                assert kf.interpolation in (LINEAR, BEZIER)
+
+    def test_expected_curve_count(self, grpc_channel: grpc.Channel) -> None:
+        stub = TextToMotionServiceStub(grpc_channel)
+        request = MotionRequest(
+            prompt="walk forward",
+            duration_seconds=3.0,
+            target_fps=30,
+            skeleton_type=VRM_HUMANOID,
+        )
+        response: MotionResponse = stub.GenerateMotion(request)
+
+        expected_curves = 22 * 3 + 3
+        assert len(response.curves) == expected_curves

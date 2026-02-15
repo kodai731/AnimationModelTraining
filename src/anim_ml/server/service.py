@@ -18,6 +18,7 @@ from anim_ml.server.motion_converter import (
 )
 from anim_ml.server.proto import (
     BEZIER,
+    LINEAR,
     AnimationCurve,
     CurveKeyframe,
     MotionRequest,
@@ -101,14 +102,51 @@ class AnimationServicer(TextToMotionServiceServicer):
             return MotionResponse()
 
         duration = request.duration_seconds or self._config.default_duration_seconds
-        duration = min(duration, self._config.max_duration_seconds)
+        duration = max(0.5, min(duration, self._config.max_duration_seconds))
+
         target_fps = request.target_fps or self._config.default_fps
+        if target_fps not in (30, 60):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"target_fps must be 30 or 60, got {target_fps}")
+            return MotionResponse()
+
+        if not self._model.is_ready():
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details("Model not loaded")
+            return MotionResponse()
 
         bone_mappings = _parse_bone_mappings(request) or None
 
+        try:
+            return self._generate_motion(request.prompt, duration, target_fps, bone_mappings)
+        except MemoryError:
+            context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+            context.set_details("Out of memory")
+            return MotionResponse()
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+                context.set_details("GPU out of memory")
+                return MotionResponse()
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return MotionResponse()
+        except Exception as e:
+            logger.exception("Unexpected error in GenerateMotion")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(f"Internal error: {e}")
+            return MotionResponse()
+
+    def _generate_motion(
+        self,
+        prompt: str,
+        duration: float,
+        target_fps: int,
+        bone_mappings: list[tuple[int, str]] | None,
+    ) -> MotionResponse:
         start_time = time.monotonic()
 
-        result = self._model.generate(request.prompt, duration)
+        result = self._model.generate(prompt, duration)
 
         conversion_config = ConversionConfig(
             target_fps=target_fps,
@@ -187,6 +225,10 @@ def _build_proto_curves(curves: list[MotionCurveData]) -> list[AnimationCurve]:
     for curve in curves:
         keyframes: list[CurveKeyframe] = []
         for i in range(len(curve.times)):
+            interpolation = _determine_interpolation(
+                curve.tangent_in[i], curve.tangent_out[i],
+            )
+
             keyframes.append(CurveKeyframe(
                 time=float(curve.times[i]),
                 value=float(curve.values[i]),
@@ -194,7 +236,7 @@ def _build_proto_curves(curves: list[MotionCurveData]) -> list[AnimationCurve]:
                 tangent_in_dv=float(curve.tangent_in[i][1]),
                 tangent_out_dt=float(curve.tangent_out[i][0]),
                 tangent_out_dv=float(curve.tangent_out[i][1]),
-                interpolation=BEZIER,
+                interpolation=interpolation,  # type: ignore[arg-type]
             ))
 
         proto_curves.append(AnimationCurve(
@@ -204,6 +246,14 @@ def _build_proto_curves(curves: list[MotionCurveData]) -> list[AnimationCurve]:
         ))
 
     return proto_curves
+
+
+def _determine_interpolation(
+    tangent_in: tuple[float, float],
+    tangent_out: tuple[float, float],
+) -> int:
+    has_bezier_curve = abs(tangent_in[1]) > 1e-6 or abs(tangent_out[1]) > 1e-6
+    return BEZIER if has_bezier_curve else LINEAR
 
 
 if __name__ == "__main__":

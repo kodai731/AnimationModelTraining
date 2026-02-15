@@ -10,6 +10,7 @@ from anim_ml.server.motion_converter import (
     PROPERTY_TRANSLATION_Y,
     PROPERTY_TRANSLATION_Z,
     ConversionConfig,
+    MotionCurveData,
     convert_6d_rotations_to_euler,
     convert_humanml3d_to_curves,
     extract_joint_rotations_6d,
@@ -17,6 +18,7 @@ from anim_ml.server.motion_converter import (
     extract_root_translation,
     resample_motion,
     retarget_to_vrm,
+    validate_motion_curves,
 )
 
 
@@ -162,8 +164,9 @@ class TestRetargetSkeleton:
         euler = np.zeros((num_frames, 21, 3))
         root_rot = np.zeros((num_frames, 3))
         root_trans = np.zeros((num_frames, 3))
+        duration = (num_frames - 1) / 20.0
 
-        curves = retarget_to_vrm(euler, root_rot, root_trans, None)
+        curves = retarget_to_vrm(euler, root_rot, root_trans, duration)
 
         assert len(curves) > 0
 
@@ -172,8 +175,9 @@ class TestRetargetSkeleton:
         euler = np.zeros((num_frames, 21, 3))
         root_rot = np.zeros((num_frames, 3))
         root_trans = np.zeros((num_frames, 3))
+        duration = (num_frames - 1) / 20.0
 
-        curves = retarget_to_vrm(euler, root_rot, root_trans, None)
+        curves = retarget_to_vrm(euler, root_rot, root_trans, duration)
 
         bone_names = {c.bone_name for c in curves}
         assert "hips" in bone_names
@@ -186,8 +190,9 @@ class TestRetargetSkeleton:
         euler = np.zeros((num_frames, 21, 3))
         root_rot = np.zeros((num_frames, 3))
         root_trans = np.zeros((num_frames, 3))
+        duration = (num_frames - 1) / 20.0
 
-        curves = retarget_to_vrm(euler, root_rot, root_trans, None)
+        curves = retarget_to_vrm(euler, root_rot, root_trans, duration)
 
         root_curves = 6
         joint_curves = 21 * 3
@@ -198,8 +203,9 @@ class TestRetargetSkeleton:
         euler = np.zeros((10, 21, 3))
         root_rot = np.zeros((10, 3))
         root_trans = np.zeros((10, 3))
+        duration = 9.0 / 20.0
 
-        curves = retarget_to_vrm(euler, root_rot, root_trans, None)
+        curves = retarget_to_vrm(euler, root_rot, root_trans, duration)
 
         property_types = {c.property_type for c in curves}
         assert PROPERTY_TRANSLATION_X in property_types
@@ -248,11 +254,113 @@ class TestEndToEnd:
     def test_custom_bone_mappings(self) -> None:
         tensor = _make_synthetic_tensor(20)
         config = ConversionConfig(target_fps=30)
-        mappings = [(1, "myBone"), (2, "otherBone")]
+        mappings = [(1, "leftUpperLeg"), (2, "rightUpperLeg")]
 
         curves = convert_humanml3d_to_curves(tensor, config, bone_mappings=mappings)
 
         bone_names = {c.bone_name for c in curves}
-        assert "myBone" in bone_names
-        assert "otherBone" in bone_names
+        assert "leftUpperLeg" in bone_names
+        assert "rightUpperLeg" in bone_names
         assert "hips" in bone_names
+
+    def test_invalid_bone_names_filtered(self) -> None:
+        tensor = _make_synthetic_tensor(20)
+        config = ConversionConfig(target_fps=30)
+        mappings = [(1, "invalidBone"), (2, "leftUpperLeg")]
+
+        curves = convert_humanml3d_to_curves(tensor, config, bone_mappings=mappings)
+
+        bone_names = {c.bone_name for c in curves}
+        assert "invalidBone" not in bone_names
+        assert "leftUpperLeg" in bone_names
+
+
+@pytest.mark.unit
+class TestValidateMotionCurves:
+    def test_filters_short_curves(self) -> None:
+        curves = [
+            MotionCurveData(
+                bone_name="hips",
+                property_type=PROPERTY_ROTATION_X,
+                times=np.array([0.0]),
+                values=np.array([1.0]),
+                tangent_in=[(0.0, 0.0)],
+                tangent_out=[(0.0, 0.0)],
+            ),
+            MotionCurveData(
+                bone_name="hips",
+                property_type=PROPERTY_ROTATION_Y,
+                times=np.array([0.0, 1.0]),
+                values=np.array([0.0, 10.0]),
+                tangent_in=[(0.0, 0.0)] * 2,
+                tangent_out=[(0.0, 0.0)] * 2,
+            ),
+        ]
+
+        result = validate_motion_curves(curves, 1.0)
+        assert len(result) == 1
+        assert result[0].property_type == PROPERTY_ROTATION_Y
+
+    def test_sanitizes_nan_values(self) -> None:
+        curves = [
+            MotionCurveData(
+                bone_name="hips",
+                property_type=PROPERTY_ROTATION_X,
+                times=np.array([0.0, 1.0]),
+                values=np.array([float("nan"), 10.0]),
+                tangent_in=[(0.0, 0.0)] * 2,
+                tangent_out=[(0.0, 0.0)] * 2,
+            ),
+        ]
+
+        result = validate_motion_curves(curves, 1.0)
+        assert len(result) == 1
+        assert result[0].values[0] == 0.0
+        assert result[0].values[1] == 10.0
+
+    def test_clamps_time_to_duration(self) -> None:
+        curves = [
+            MotionCurveData(
+                bone_name="spine",
+                property_type=PROPERTY_ROTATION_X,
+                times=np.array([-0.1, 0.5, 2.5]),
+                values=np.array([0.0, 5.0, 10.0]),
+                tangent_in=[(0.0, 0.0)] * 3,
+                tangent_out=[(0.0, 0.0)] * 3,
+            ),
+        ]
+
+        result = validate_motion_curves(curves, 2.0)
+        assert result[0].times[0] == 0.0
+        assert result[0].times[2] == 2.0
+
+    def test_filters_invalid_bone_names(self) -> None:
+        curves = [
+            MotionCurveData(
+                bone_name="invalidBone",
+                property_type=PROPERTY_ROTATION_X,
+                times=np.array([0.0, 1.0]),
+                values=np.array([0.0, 10.0]),
+                tangent_in=[(0.0, 0.0)] * 2,
+                tangent_out=[(0.0, 0.0)] * 2,
+            ),
+        ]
+
+        result = validate_motion_curves(curves, 1.0)
+        assert len(result) == 0
+
+    def test_sanitizes_nan_tangents(self) -> None:
+        curves = [
+            MotionCurveData(
+                bone_name="hips",
+                property_type=PROPERTY_ROTATION_X,
+                times=np.array([0.0, 1.0]),
+                values=np.array([0.0, 10.0]),
+                tangent_in=[(float("nan"), 0.0), (0.0, float("inf"))],
+                tangent_out=[(0.0, 0.0)] * 2,
+            ),
+        ]
+
+        result = validate_motion_curves(curves, 1.0)
+        assert result[0].tangent_in[0] == (0.0, 0.0)
+        assert result[0].tangent_in[1] == (0.0, 0.0)

@@ -48,6 +48,9 @@ def convert_humanml3d_to_curves(
     config: ConversionConfig,
     bone_mappings: list[tuple[int, str]] | None = None,
 ) -> list[MotionCurveData]:
+    num_source_frames = motion_tensor.shape[0]
+    duration = (num_source_frames - 1) / SOURCE_FPS if num_source_frames > 1 else 0.0
+
     rot_6d = extract_joint_rotations_6d(motion_tensor)
     euler_rotations = convert_6d_rotations_to_euler(rot_6d)
 
@@ -60,10 +63,12 @@ def convert_humanml3d_to_curves(
     )
 
     curves = retarget_to_vrm(
-        euler_rotations, root_rotation, root_translation, bone_mappings,
+        euler_rotations, root_rotation, root_translation,
+        duration, bone_mappings,
     )
 
-    return reduce_and_fit_curves(curves, config)
+    fitted_curves = reduce_and_fit_curves(curves, config)
+    return validate_motion_curves(fitted_curves, duration)
 
 
 def extract_joint_rotations_6d(motion_tensor: np.ndarray) -> np.ndarray:
@@ -145,7 +150,8 @@ def retarget_to_vrm(
     euler_rotations: np.ndarray,
     root_rotation: np.ndarray,
     root_translation: np.ndarray,
-    bone_mappings: list[tuple[int, str]] | None,
+    duration: float,
+    bone_mappings: list[tuple[int, str]] | None = None,
 ) -> list[MotionCurveData]:
     if bone_mappings is None:
         bone_mappings = [
@@ -155,7 +161,6 @@ def retarget_to_vrm(
         ]
 
     num_frames = euler_rotations.shape[0]
-    duration = (num_frames - 1) / SOURCE_FPS if num_frames > 1 else 0.0
     times = np.linspace(0.0, duration, num_frames)
 
     curves: list[MotionCurveData] = []
@@ -206,6 +211,42 @@ def reduce_and_fit_curves(
         ))
 
     return result
+
+
+def validate_motion_curves(
+    curves: list[MotionCurveData],
+    duration: float,
+) -> list[MotionCurveData]:
+    valid_vrm_names = set(SMPL_TO_VRM_MAPPING.values())
+    validated: list[MotionCurveData] = []
+
+    for curve in curves:
+        if curve.bone_name not in valid_vrm_names:
+            continue
+
+        if len(curve.times) < 2:
+            continue
+
+        nan_mask = np.isnan(curve.values) | np.isinf(curve.values)
+        if np.any(nan_mask):
+            curve.values = np.where(nan_mask, 0.0, curve.values)
+
+        curve.tangent_in = [_sanitize_tangent(t) for t in curve.tangent_in]
+        curve.tangent_out = [_sanitize_tangent(t) for t in curve.tangent_out]
+
+        curve.times = np.clip(curve.times, 0.0, max(duration, 0.0))
+        validated.append(curve)
+
+    return validated
+
+
+def _sanitize_tangent(tangent: tuple[float, float]) -> tuple[float, float]:
+    dt, dv = tangent
+    if not np.isfinite(dt):
+        dt = 0.0
+    if not np.isfinite(dv):
+        dv = 0.0
+    return (dt, dv)
 
 
 def _retarget_joint_rotation(euler_degrees: np.ndarray) -> np.ndarray:
