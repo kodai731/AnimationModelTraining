@@ -256,7 +256,7 @@ def save_checkpoint(
 
 
 def load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
-    return torch.load(path, map_location=device, weights_only=False)  # type: ignore[no-any-return]
+    return torch.load(path, map_location="cpu", weights_only=False)  # type: ignore[no-any-return]
 
 
 def train(
@@ -312,7 +312,7 @@ def train(
     start_epoch = 1
 
     if resume_path is not None:
-        ckpt = load_checkpoint(resume_path, device)
+        ckpt = load_checkpoint(resolve_data_path(resume_path), device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
