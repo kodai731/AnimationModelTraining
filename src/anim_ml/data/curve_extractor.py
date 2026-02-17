@@ -7,8 +7,9 @@ import numpy as np
 from scipy.interpolate import interp1d  # type: ignore[import-untyped]
 
 from anim_ml.utils.bezier_fitter import BezierKeyframe, fit_bezier_segments
+from anim_ml.utils.bone_tokenizer import tokenize_bone_name
 from anim_ml.utils.keyframe_reducer import reduce_keyframes
-from anim_ml.utils.skeleton import classify_joint
+from anim_ml.utils.topology import compute_topology_features
 
 if TYPE_CHECKING:
     from anim_ml.data.bvh_parser import MotionData
@@ -19,7 +20,8 @@ class CurveSample:
     context_keyframes: np.ndarray
     target_keyframe: np.ndarray
     property_type: int
-    joint_category: int
+    topology_features: np.ndarray
+    bone_name_tokens: np.ndarray
     query_time: float
     clip_duration: float
     joint_depth: int
@@ -59,12 +61,15 @@ def extract_curve_samples(
 
     skeleton_height = _estimate_skeleton_height(motion)
 
+    topo_features_map = compute_topology_features(joint_names, parent_indices)
+
     samples: list[CurveSample] = []
     num_joints = positions.shape[1]
 
     for joint_idx in range(num_joints):
         joint_name = joint_names[joint_idx] if joint_idx < len(joint_names) else "unknown"
-        category = int(classify_joint(joint_name))
+        topo_feat = np.array(topo_features_map.get(joint_name, [0.0] * 6), dtype=np.float32)
+        name_tokens = np.array(tokenize_bone_name(joint_name), dtype=np.int64)
         depth = _compute_joint_depth(parent_indices, joint_idx)
 
         for channel_idx in range(6):
@@ -90,7 +95,8 @@ def extract_curve_samples(
             channel_samples = _generate_sliding_window_samples(
                 bezier_keyframes,
                 property_type=channel_idx,
-                joint_category=category,
+                topology_features=topo_feat,
+                bone_name_tokens=name_tokens,
                 clip_duration=duration,
                 joint_depth=depth,
                 scale=scale,
@@ -158,7 +164,8 @@ def _get_channel_values(
 def _generate_sliding_window_samples(
     bezier_keyframes: list[BezierKeyframe],
     property_type: int,
-    joint_category: int,
+    topology_features: np.ndarray,
+    bone_name_tokens: np.ndarray,
     clip_duration: float,
     joint_depth: int,
     scale: float,
@@ -208,7 +215,8 @@ def _generate_sliding_window_samples(
             context_keyframes=context_array,
             target_keyframe=target_array,
             property_type=property_type,
-            joint_category=joint_category,
+            topology_features=topology_features,
+            bone_name_tokens=bone_name_tokens,
             query_time=float(target_kf.time / time_scale),
             clip_duration=clip_duration,
             joint_depth=joint_depth,

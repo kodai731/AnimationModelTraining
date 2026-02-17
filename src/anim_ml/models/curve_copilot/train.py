@@ -15,6 +15,7 @@ from anim_ml.data.curve_dataset import CurveCopilotDataset
 from anim_ml.models.curve_copilot.model import CurveCopilotConfig, CurveCopilotModel
 from anim_ml.paths import resolve_data_path
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
+from anim_ml.utils.optimizer import DmlAdamW
 from anim_ml.utils.timing_log import TimingLog
 
 
@@ -96,9 +97,12 @@ def compute_loss(
 
     tangent_magnitude: torch.Tensor = torch.norm(target[:, 2:6], dim=1)  # type: ignore[assignment]
     interp_target: torch.Tensor = (tangent_magnitude > 0.01).float()  # type: ignore[assignment]
-    interp_loss = nn.functional.binary_cross_entropy_with_logits(
-        prediction[:, 5], interp_target,  # type: ignore[arg-type]
-    )
+    logits = prediction[:, 5]
+    interp_loss = (
+        torch.clamp(logits, min=0)
+        - logits * interp_target
+        + torch.log1p(torch.exp(-torch.abs(logits)))
+    ).mean()
 
     confidence_loss = mse(confidence, confidence_targets)
 
@@ -123,8 +127,8 @@ def create_optimizer_and_scheduler(
     model: nn.Module,
     config: TrainingConfig,
     steps_per_epoch: int,
-) -> tuple[torch.optim.AdamW, torch.optim.lr_scheduler.LambdaLR]:
-    optimizer = torch.optim.AdamW(
+) -> tuple[DmlAdamW, torch.optim.lr_scheduler.LambdaLR]:
+    optimizer = DmlAdamW(
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
@@ -146,7 +150,7 @@ def create_optimizer_and_scheduler(
 def train_one_epoch(
     model: CurveCopilotModel,
     dataloader: DataLoader[dict[str, torch.Tensor]],
-    optimizer: torch.optim.AdamW,
+    optimizer: DmlAdamW,
     scheduler: torch.optim.lr_scheduler.LambdaLR,
     config: TrainConfig,
     device: torch.device,
@@ -159,7 +163,8 @@ def train_one_epoch(
     for step, batch in enumerate(dataloader):
         context = batch["context_keyframes"].to(device, non_blocking=True)
         prop_type = batch["property_type"].to(device, non_blocking=True)
-        joint_cat = batch["joint_category"].to(device, non_blocking=True)
+        topo_features = batch["topology_features"].to(device, non_blocking=True)
+        bone_name_tokens = batch["bone_name_tokens"].to(device, non_blocking=True)
         query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
         target = batch["target"].to(device, non_blocking=True)
 
@@ -169,7 +174,9 @@ def train_one_epoch(
             value_distance = torch.abs(target_value - last_context_value)
             confidence_targets = torch.exp(-value_distance * 5.0).unsqueeze(-1)
 
-        prediction, confidence = model(context, prop_type, joint_cat, query_time)
+        prediction, confidence = model(
+            context, prop_type, topo_features, bone_name_tokens, query_time,
+        )
         loss, metrics = compute_loss(
             prediction, confidence, target, config.training.loss_weights, confidence_targets,
         )
@@ -204,7 +211,8 @@ def validate(
     for batch in dataloader:
         context = batch["context_keyframes"].to(device, non_blocking=True)
         prop_type = batch["property_type"].to(device, non_blocking=True)
-        joint_cat = batch["joint_category"].to(device, non_blocking=True)
+        topo_features = batch["topology_features"].to(device, non_blocking=True)
+        bone_name_tokens = batch["bone_name_tokens"].to(device, non_blocking=True)
         query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
         target = batch["target"].to(device, non_blocking=True)
 
@@ -213,7 +221,9 @@ def validate(
         value_distance = torch.abs(target_value - last_context_value)
         confidence_targets = torch.exp(-value_distance * 5.0).unsqueeze(-1)
 
-        prediction, confidence = model(context, prop_type, joint_cat, query_time)
+        prediction, confidence = model(
+            context, prop_type, topo_features, bone_name_tokens, query_time,
+        )
         _, metrics = compute_loss(
             prediction, confidence, target, config.training.loss_weights, confidence_targets,
         )
@@ -226,7 +236,7 @@ def validate(
 
 def save_checkpoint(
     model: CurveCopilotModel,
-    optimizer: torch.optim.AdamW,
+    optimizer: DmlAdamW,
     scheduler: torch.optim.lr_scheduler.LambdaLR,
     epoch: int,
     metrics: dict[str, float],
@@ -251,14 +261,35 @@ def save_checkpoint(
             "max_seq": model.config.max_seq,
             "dropout": model.config.dropout,
             "num_property_types": model.config.num_property_types,
-            "num_joint_categories": model.config.num_joint_categories,
             "keyframe_dim": model.config.keyframe_dim,
+            "vocab_size": model.config.vocab_size,
+            "token_length": model.config.token_length,
+            "char_embed_dim": model.config.char_embed_dim,
+            "conv_channels": model.config.conv_channels,
+            "bone_context_dim": model.config.bone_context_dim,
+            "topology_dim": model.config.topology_dim,
         },
     }, path)
 
 
 def load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
     return torch.load(path, map_location="cpu", weights_only=False)  # type: ignore[no-any-return]
+
+
+def _migrate_mha_keys(state_dict: dict[str, Any]) -> dict[str, Any]:
+    remap = {
+        ".attn.in_proj_weight": ".attn.qkv_proj.weight",
+        ".attn.in_proj_bias": ".attn.qkv_proj.bias",
+    }
+    migrated: dict[str, Any] = {}
+    for key, value in state_dict.items():
+        new_key = key
+        for old_suffix, new_suffix in remap.items():
+            if old_suffix in key:
+                new_key = key.replace(old_suffix, new_suffix)
+                break
+        migrated[new_key] = value
+    return migrated
 
 
 def train(
@@ -315,7 +346,7 @@ def train(
 
     if resume_path is not None:
         ckpt = load_checkpoint(resolve_data_path(resume_path), device)
-        model.load_state_dict(ckpt["model_state_dict"])
+        model.load_state_dict(_migrate_mha_keys(ckpt["model_state_dict"]), strict=False)
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_epoch = ckpt["epoch"] + 1

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import onnx
@@ -10,6 +10,9 @@ import torch
 
 from anim_ml.models.curve_copilot.export_onnx import export_to_onnx
 from anim_ml.models.curve_copilot.model import CurveCopilotConfig, CurveCopilotModel
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_small_model() -> CurveCopilotModel:
@@ -50,17 +53,21 @@ class TestPytorchOrtParity:
 
         context = torch.randn(2, 8, 6)
         prop_type = torch.tensor([0, 3], dtype=torch.long)
-        joint_cat = torch.tensor([1, 2], dtype=torch.long)
+        topo_features = torch.rand(2, 6)
+        bone_tokens = torch.randint(0, 64, (2, 32))
         query_time = torch.tensor([0.3, 0.7])
 
         with torch.no_grad():
-            pt_pred, pt_conf = pytorch_model(context, prop_type, joint_cat, query_time)
+            pt_pred, pt_conf = pytorch_model(
+                context, prop_type, topo_features, bone_tokens, query_time,
+            )
 
         session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
         ort_inputs = {
             "context_keyframes": context.numpy(),
             "property_type": prop_type.numpy(),
-            "joint_category": joint_cat.numpy(),
+            "topology_features": topo_features.numpy(),
+            "bone_name_tokens": bone_tokens.numpy(),
             "query_time": query_time.numpy(),
         }
         ort_pred, ort_conf = session.run(None, ort_inputs)
@@ -79,7 +86,8 @@ class TestDynamicBatch:
         inputs = {
             "context_keyframes": np.random.randn(batch_size, 8, 6).astype(np.float32),
             "property_type": np.zeros(batch_size, dtype=np.int64),
-            "joint_category": np.zeros(batch_size, dtype=np.int64),
+            "topology_features": np.random.rand(batch_size, 6).astype(np.float32),
+            "bone_name_tokens": np.zeros((batch_size, 32), dtype=np.int64),
             "query_time": np.random.rand(batch_size).astype(np.float32),
         }
         pred, conf = session.run(None, inputs)
@@ -111,7 +119,8 @@ class TestLatency:
         inputs = {
             "context_keyframes": np.random.randn(1, 8, 6).astype(np.float32),
             "property_type": np.zeros(1, dtype=np.int64),
-            "joint_category": np.zeros(1, dtype=np.int64),
+            "topology_features": np.random.rand(1, 6).astype(np.float32),
+            "bone_name_tokens": np.zeros((1, 32), dtype=np.int64),
             "query_time": np.array([0.5], dtype=np.float32),
         }
 

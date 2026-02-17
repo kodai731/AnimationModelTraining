@@ -17,6 +17,9 @@ from anim_ml.utils.bezier_fitter import BezierKeyframe
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 
+DUMMY_TOPO = np.zeros(6, dtype=np.float32)
+DUMMY_TOKENS = np.zeros(32, dtype=np.int64)
+
 
 @pytest.mark.unit
 class TestExtractCurveSamples:
@@ -52,11 +55,19 @@ class TestExtractCurveSamples:
         for pt in prop_types:
             assert 0 <= pt <= 5
 
-    def test_joint_category_range(self) -> None:
+    def test_topology_features_shape(self) -> None:
         motion = parse_bvh(FIXTURES_DIR / "simple.bvh")
         samples = extract_curve_samples(motion)
         for s in samples:
-            assert 0 <= s.joint_category <= 6
+            assert s.topology_features.shape == (6,)
+            assert s.topology_features.dtype == np.float32
+
+    def test_bone_name_tokens_shape(self) -> None:
+        motion = parse_bvh(FIXTURES_DIR / "simple.bvh")
+        samples = extract_curve_samples(motion)
+        for s in samples:
+            assert s.bone_name_tokens.shape == (32,)
+            assert s.bone_name_tokens.dtype == np.int64
 
     def test_query_time_normalized(self) -> None:
         motion = parse_bvh(FIXTURES_DIR / "simple.bvh")
@@ -99,7 +110,6 @@ class TestZUpExtraction:
 @pytest.mark.unit
 class TestEdgeCases:
     def test_short_motion_returns_empty(self) -> None:
-        from anim_ml.data.bvh_parser import MotionData
         motion = MotionData(
             joint_names=["root"],
             parent_indices=[-1],
@@ -141,7 +151,7 @@ def _make_bezier_keyframes(
 ) -> list[BezierKeyframe]:
     return [
         BezierKeyframe(t, v, (-0.1, 0.0), (0.1, 0.0))
-        for t, v in zip(times, values)
+        for t, v in zip(times, values, strict=True)
     ]
 
 
@@ -153,7 +163,8 @@ class TestNearConstantCurveSkipped:
             values=[0.5, 0.5, 0.5, 0.5, 0.5],
         )
         samples = _generate_sliding_window_samples(
-            keyframes, property_type=0, joint_category=0,
+            keyframes, property_type=0,
+            topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=2.0, joint_depth=0, scale=1.0,
         )
         assert len(samples) == 0
@@ -164,7 +175,8 @@ class TestNearConstantCurveSkipped:
             values=[0.5, 0.5001, 0.5, 0.4999, 0.5],
         )
         samples = _generate_sliding_window_samples(
-            keyframes, property_type=0, joint_category=0,
+            keyframes, property_type=0,
+            topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=2.0, joint_depth=0, scale=1.0,
         )
         assert len(samples) == 0
@@ -175,7 +187,8 @@ class TestNearConstantCurveSkipped:
             values=[0.0, 0.5, 1.0, 0.3, 0.8],
         )
         samples = _generate_sliding_window_samples(
-            keyframes, property_type=0, joint_category=0,
+            keyframes, property_type=0,
+            topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=2.0, joint_depth=0, scale=1.0,
         )
         assert len(samples) > 0
@@ -217,7 +230,8 @@ class TestNormalizedValueBound:
             values=[0.0, 0.2, -0.1, 0.5, 0.3, 0.8, 0.1, 0.6, 0.4, 0.9],
         )
         samples = _generate_sliding_window_samples(
-            keyframes, property_type=3, joint_category=1,
+            keyframes, property_type=3,
+            topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=4.0, joint_depth=2, scale=90.0,
         )
 
@@ -299,7 +313,8 @@ class TestCurveStdThreshold:
         )
 
         samples = _generate_sliding_window_samples(
-            keyframes, property_type=0, joint_category=0,
+            keyframes, property_type=0,
+            topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=4.5, joint_depth=0, scale=1.0,
         )
 
@@ -323,7 +338,8 @@ class TestLossReasonable:
         context = torch.from_numpy(np.stack([s.context_keyframes for s in samples[:64]]))
         target = torch.from_numpy(np.stack([s.target_keyframe for s in samples[:64]]))
         prop_type = torch.tensor([s.property_type for s in samples[:64]], dtype=torch.long)
-        joint_cat = torch.tensor([s.joint_category for s in samples[:64]], dtype=torch.long)
+        topo_features = torch.from_numpy(np.stack([s.topology_features for s in samples[:64]]))
+        bone_tokens = torch.from_numpy(np.stack([s.bone_name_tokens for s in samples[:64]]))
         query_time = torch.tensor([s.query_time for s in samples[:64]], dtype=torch.float32)
 
         config = CurveCopilotConfig(d_model=32, n_heads=2, d_ff=64, n_layers=2, dropout=0.0)
@@ -331,7 +347,9 @@ class TestLossReasonable:
         model.eval()
 
         with torch.no_grad():
-            prediction, confidence = model(context, prop_type, joint_cat, query_time)
+            prediction, confidence = model(
+                context, prop_type, topo_features, bone_tokens, query_time,
+            )
 
             last_context_value = context[:, -1, 1]
             target_value = target[:, 1]

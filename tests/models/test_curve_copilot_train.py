@@ -50,8 +50,12 @@ def _create_test_hdf5(tmp_path: Path) -> Path:
                 data=np.array([s.property_type for s in samples], dtype=np.int32),
             )
             grp.create_dataset(
-                "joint_category",
-                data=np.array([s.joint_category for s in samples], dtype=np.int32),
+                "topology_features",
+                data=np.stack([s.topology_features for s in samples]),
+            )
+            grp.create_dataset(
+                "bone_name_tokens",
+                data=np.stack([s.bone_name_tokens for s in samples]),
             )
             grp.create_dataset(
                 "query_time",
@@ -233,7 +237,8 @@ class TestCheckpoint:
         inputs = {
             "context_keyframes": torch.randn(1, 8, 6),
             "property_type": torch.zeros(1, dtype=torch.long),
-            "joint_category": torch.zeros(1, dtype=torch.long),
+            "topology_features": torch.randn(1, 6),
+            "bone_name_tokens": torch.zeros(1, 32, dtype=torch.long),
             "query_time": torch.tensor([0.5]),
         }
 

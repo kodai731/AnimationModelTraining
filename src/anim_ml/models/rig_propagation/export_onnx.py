@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +67,8 @@ def main() -> None:
     from anim_ml.paths import get_exports_dir, get_runs_dir
 
     default_checkpoint = str(get_runs_dir() / "rig_propagation" / "best.pt")
-    default_output = str(get_exports_dir() / "rig_propagation.onnx")
+    date_tag = datetime.now().strftime("%Y%m%d")
+    default_output = str(get_exports_dir() / f"rig_propagation_{date_tag}.onnx")
 
     parser = argparse.ArgumentParser(description="Export Rig Propagation to ONNX")
     parser.add_argument(

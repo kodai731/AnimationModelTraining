@@ -16,7 +16,8 @@ def _make_dummy_input(
     return {
         "context_keyframes": torch.randn(batch, seq_len, 6, device=device),
         "property_type": torch.randint(0, 9, (batch,), device=device),
-        "joint_category": torch.randint(0, 7, (batch,), device=device),
+        "topology_features": torch.rand(batch, 6, device=device),
+        "bone_name_tokens": torch.randint(0, 64, (batch, 32), device=device),
         "query_time": torch.rand(batch, device=device),
     }
 

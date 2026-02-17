@@ -23,7 +23,6 @@ def _create_test_hdf5(tmp_path: Path) -> Path:
     with h5py.File(hdf5_path, "w") as f:
         for split_name in ("train", "val"):
             grp = f.create_group(split_name)
-            n = len(samples)
             grp.create_dataset(
                 "context_keyframes",
                 data=np.stack([s.context_keyframes for s in samples]),
@@ -37,8 +36,12 @@ def _create_test_hdf5(tmp_path: Path) -> Path:
                 data=np.array([s.property_type for s in samples], dtype=np.int32),
             )
             grp.create_dataset(
-                "joint_category",
-                data=np.array([s.joint_category for s in samples], dtype=np.int32),
+                "topology_features",
+                data=np.stack([s.topology_features for s in samples]),
+            )
+            grp.create_dataset(
+                "bone_name_tokens",
+                data=np.stack([s.bone_name_tokens for s in samples]),
             )
             grp.create_dataset(
                 "query_time",
@@ -64,7 +67,8 @@ class TestCurveCopilotDataset:
         assert isinstance(item["context_keyframes"], torch.Tensor)
         assert isinstance(item["target"], torch.Tensor)
         assert isinstance(item["property_type"], torch.Tensor)
-        assert isinstance(item["joint_category"], torch.Tensor)
+        assert isinstance(item["topology_features"], torch.Tensor)
+        assert isinstance(item["bone_name_tokens"], torch.Tensor)
         assert isinstance(item["query_time"], torch.Tensor)
 
         dataset.close()
@@ -77,7 +81,8 @@ class TestCurveCopilotDataset:
         assert item["context_keyframes"].shape == (8, 6)
         assert item["target"].shape == (6,)
         assert item["property_type"].shape == ()
-        assert item["joint_category"].shape == ()
+        assert item["topology_features"].shape == (6,)
+        assert item["bone_name_tokens"].shape == (32,)
         assert item["query_time"].shape == (1,)
 
         dataset.close()
@@ -90,7 +95,8 @@ class TestCurveCopilotDataset:
         assert item["context_keyframes"].dtype == torch.float32
         assert item["target"].dtype == torch.float32
         assert item["property_type"].dtype == torch.int64
-        assert item["joint_category"].dtype == torch.int64
+        assert item["topology_features"].dtype == torch.float32
+        assert item["bone_name_tokens"].dtype == torch.int64
         assert item["query_time"].dtype == torch.float32
 
         dataset.close()

@@ -15,6 +15,7 @@ from anim_ml.data.rig_dataset import RigPropagationDataset
 from anim_ml.models.rig_propagation.model import RigPropagationConfig, RigPropagationModel
 from anim_ml.paths import resolve_data_path
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
+from anim_ml.utils.optimizer import DmlAdamW
 from anim_ml.utils.timing_log import TimingLog
 
 
@@ -85,8 +86,7 @@ def compute_rotation_loss(
     target: torch.Tensor,
 ) -> torch.Tensor:
     dot = (pred * target).sum(dim=-1)
-    angle = 2.0 * torch.acos(torch.clamp(dot.abs(), 0.0, 1.0))
-    return angle.mean()
+    return (1.0 - dot.abs()).mean()
 
 
 def compute_loss(
@@ -98,9 +98,11 @@ def compute_loss(
 ) -> tuple[torch.Tensor, dict[str, float]]:
     rotation_loss = compute_rotation_loss(rotation_deltas, target_deltas)
 
-    confidence_loss = nn.functional.binary_cross_entropy(
-        confidence.squeeze(-1), confidence_targets,
-    )
+    eps = 1e-7
+    p = confidence.squeeze(-1).clamp(eps, 1 - eps)
+    confidence_loss = -(
+        confidence_targets * p.log() + (1 - confidence_targets) * (1 - p).log()
+    ).mean()
 
     total = weights.rotation * rotation_loss + weights.confidence * confidence_loss
 
@@ -116,8 +118,8 @@ def create_optimizer_and_scheduler(
     model: nn.Module,
     config: TrainingConfig,
     steps_per_epoch: int,
-) -> tuple[torch.optim.AdamW, torch.optim.lr_scheduler.LambdaLR]:
-    optimizer = torch.optim.AdamW(
+) -> tuple[DmlAdamW, torch.optim.lr_scheduler.LambdaLR]:
+    optimizer = DmlAdamW(
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
@@ -139,7 +141,7 @@ def create_optimizer_and_scheduler(
 def train_one_epoch(
     model: RigPropagationModel,
     dataloader: DataLoader[dict[str, torch.Tensor]],
-    optimizer: torch.optim.AdamW,
+    optimizer: DmlAdamW,
     scheduler: torch.optim.lr_scheduler.LambdaLR,
     config: TrainConfig,
     device: torch.device,
@@ -208,7 +210,7 @@ def validate(
 
 def save_checkpoint(
     model: RigPropagationModel,
-    optimizer: torch.optim.AdamW,
+    optimizer: DmlAdamW,
     scheduler: torch.optim.lr_scheduler.LambdaLR,
     epoch: int,
     metrics: dict[str, float],
