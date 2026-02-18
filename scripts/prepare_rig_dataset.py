@@ -7,16 +7,27 @@ from pathlib import Path
 import numpy as np
 
 from anim_ml.data.bvh_parser import parse_bvh
-from anim_ml.data.dataset_100style import find_100style_bvh_files, map_100style_to_smpl
-from anim_ml.data.dataset_cmu import find_cmu_bvh_files, map_cmu_to_smpl
+from anim_ml.data.dataset_100style import find_100style_bvh_files
+from anim_ml.data.dataset_cmu import find_cmu_bvh_files
 from anim_ml.data.rig_data_generator import (
-    build_adjacency,
     generate_rig_samples_from_motion,
     save_rig_samples_hdf5,
 )
-from anim_ml.utils.skeleton import SMPL_22_PARENT_INDICES
 
 logger = logging.getLogger(__name__)
+
+Z_UP_DATASETS = {"cmu"}
+
+
+def find_generic_bvh_files(data_dir: Path) -> list[Path]:
+    return sorted(
+        p for p in data_dir.rglob("*.bvh")
+        if "__MACOSX" not in p.parts and not p.name.startswith("._")
+    )
+
+
+def detect_z_up(dataset_type: str) -> bool:
+    return dataset_type in Z_UP_DATASETS
 
 
 def collect_bvh_files(dataset: str, raw_dir: Path) -> list[tuple[Path, str]]:
@@ -34,6 +45,18 @@ def collect_bvh_files(dataset: str, raw_dir: Path) -> list[tuple[Path, str]]:
             for p in find_100style_bvh_files(style_dir):
                 files.append((p, "100style"))
 
+    if dataset in ("accad", "all"):
+        accad_dir = raw_dir / "accad" / "bvh"
+        if accad_dir.exists():
+            for p in find_generic_bvh_files(accad_dir):
+                files.append((p, "accad"))
+
+    if dataset in ("generic", "all"):
+        generic_dir = raw_dir / "generic" / "bvh"
+        if generic_dir.exists():
+            for p in find_generic_bvh_files(generic_dir):
+                files.append((p, "generic"))
+
     return files
 
 
@@ -43,16 +66,9 @@ def process_single_bvh(
     rng: np.random.Generator,
 ) -> list:
     try:
-        z_up = dataset_type == "cmu"
+        z_up = detect_z_up(dataset_type)
         motion = parse_bvh(filepath, z_up=z_up)
-
-        mapped = map_cmu_to_smpl(motion) if dataset_type == "cmu" else map_100style_to_smpl(motion)
-
-        if mapped is None:
-            logger.warning("Skipping (insufficient joint mapping): %s", filepath.name)
-            return []
-
-        return generate_rig_samples_from_motion(mapped, rng=rng)
+        return generate_rig_samples_from_motion(motion, rng=rng)
 
     except Exception:
         logger.exception("Failed to process: %s", filepath)
@@ -81,9 +97,8 @@ def run_pipeline(dataset: str, raw_dir: Path, output_dir: Path, limit: int | Non
         logger.warning("No samples generated. Check raw data directory.")
         return
 
-    adjacency = build_adjacency(SMPL_22_PARENT_INDICES)
     output_path = output_dir / f"{dataset}_rig.h5"
-    save_rig_samples_hdf5(all_samples, output_path, adjacency)
+    save_rig_samples_hdf5(all_samples, output_path)
     logger.info("Saved to %s", output_path)
 
 
@@ -92,7 +107,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Prepare rig propagation training dataset")
     parser.add_argument(
-        "--dataset", choices=["cmu", "100style", "all"], default="all",
+        "--dataset",
+        choices=["cmu", "100style", "accad", "generic", "all"],
+        default="all",
     )
     parser.add_argument("--raw-dir", type=Path, default=get_raw_data_dir())
     parser.add_argument("--output-dir", type=Path, default=get_processed_data_dir())

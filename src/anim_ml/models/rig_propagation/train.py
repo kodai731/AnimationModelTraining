@@ -84,9 +84,14 @@ def load_config(config_path: str | Path) -> TrainConfig:
 def compute_rotation_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
+    mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     dot = (pred * target).sum(dim=-1)
-    return (1.0 - dot.abs()).mean()
+    loss = 1.0 - dot.abs()
+    if mask is not None:
+        loss = loss * mask
+        return loss.sum() / mask.sum().clamp(min=1.0)
+    return loss.mean()
 
 
 def compute_loss(
@@ -95,14 +100,19 @@ def compute_loss(
     target_deltas: torch.Tensor,
     confidence_targets: torch.Tensor,
     weights: LossWeights,
+    joint_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    rotation_loss = compute_rotation_loss(rotation_deltas, target_deltas)
+    rotation_loss = compute_rotation_loss(rotation_deltas, target_deltas, joint_mask)
 
     eps = 1e-7
     p = confidence.squeeze(-1).clamp(eps, 1 - eps)
-    confidence_loss = -(
+    confidence_loss_raw = -(
         confidence_targets * p.log() + (1 - confidence_targets) * (1 - p).log()
-    ).mean()
+    )
+    if joint_mask is not None:
+        confidence_loss = (confidence_loss_raw * joint_mask).sum() / joint_mask.sum().clamp(min=1.0)
+    else:
+        confidence_loss = confidence_loss_raw.mean()
 
     total = weights.rotation * rotation_loss + weights.confidence * confidence_loss
 
@@ -153,14 +163,23 @@ def train_one_epoch(
 
     for step, batch in enumerate(dataloader):
         joint_features = batch["joint_features"].to(device, non_blocking=True)
-        joint_types = batch["joint_types"].to(device, non_blocking=True)
+        topology_features = batch["topology_features"].to(device, non_blocking=True)
+        bone_name_tokens = batch["bone_name_tokens"].to(device, non_blocking=True)
+        joint_mask = batch["joint_mask"].to(device, non_blocking=True)
         target_deltas = batch["target_deltas"].to(device, non_blocking=True)
         confidence_targets = batch["confidence_targets"].to(device, non_blocking=True)
+        source_indices = batch["source_indices"][0].to(device, non_blocking=True)
+        target_indices = batch["target_indices"][0].to(device, non_blocking=True)
+        edge_direction = batch["edge_direction"][0].to(device, non_blocking=True)
+        edge_mask = batch["edge_mask"][0].to(device, non_blocking=True).float()
 
-        rotation_deltas, confidence = model(joint_features, joint_types)
+        rotation_deltas, confidence = model(
+            joint_features, topology_features, bone_name_tokens, joint_mask,
+            source_indices, target_indices, edge_direction, edge_mask,
+        )
         loss, metrics = compute_loss(
             rotation_deltas, confidence, target_deltas,
-            confidence_targets, config.training.loss_weights,
+            confidence_targets, config.training.loss_weights, joint_mask,
         )
 
         optimizer.zero_grad()
@@ -192,14 +211,23 @@ def validate(
 
     for batch in dataloader:
         joint_features = batch["joint_features"].to(device, non_blocking=True)
-        joint_types = batch["joint_types"].to(device, non_blocking=True)
+        topology_features = batch["topology_features"].to(device, non_blocking=True)
+        bone_name_tokens = batch["bone_name_tokens"].to(device, non_blocking=True)
+        joint_mask = batch["joint_mask"].to(device, non_blocking=True)
         target_deltas = batch["target_deltas"].to(device, non_blocking=True)
         confidence_targets = batch["confidence_targets"].to(device, non_blocking=True)
+        source_indices = batch["source_indices"][0].to(device, non_blocking=True)
+        target_indices = batch["target_indices"][0].to(device, non_blocking=True)
+        edge_direction = batch["edge_direction"][0].to(device, non_blocking=True)
+        edge_mask = batch["edge_mask"][0].to(device, non_blocking=True).float()
 
-        rotation_deltas, confidence = model(joint_features, joint_types)
+        rotation_deltas, confidence = model(
+            joint_features, topology_features, bone_name_tokens, joint_mask,
+            source_indices, target_indices, edge_direction, edge_mask,
+        )
         _, metrics = compute_loss(
             rotation_deltas, confidence, target_deltas,
-            confidence_targets, config.training.loss_weights,
+            confidence_targets, config.training.loss_weights, joint_mask,
         )
 
         total_loss += metrics["loss/total"]
@@ -226,16 +254,21 @@ def save_checkpoint(
         "metrics": metrics,
         "best_val_loss": best_val_loss,
         "config": {
-            "num_joints": model.config.num_joints,
+            "max_joints": model.config.max_joints,
+            "max_edges": model.config.max_edges,
             "node_feature_dim": model.config.node_feature_dim,
             "edge_feature_dim": model.config.edge_feature_dim,
             "hidden_dim": model.config.hidden_dim,
             "ffn_dim": model.config.ffn_dim,
             "num_message_passing_layers": model.config.num_message_passing_layers,
-            "num_joint_types": model.config.num_joint_types,
-            "joint_type_embed_dim": model.config.joint_type_embed_dim,
             "input_feature_dim": model.config.input_feature_dim,
             "dropout": model.config.dropout,
+            "vocab_size": model.config.vocab_size,
+            "token_length": model.config.token_length,
+            "char_embed_dim": model.config.char_embed_dim,
+            "conv_channels": model.config.conv_channels,
+            "bone_context_dim": model.config.bone_context_dim,
+            "topology_dim": model.config.topology_dim,
         },
     }, path)
 
@@ -256,9 +289,7 @@ def train(
     train_dataset = RigPropagationDataset(train_paths, split="train")
     val_dataset = RigPropagationDataset(train_paths, split=config.data.val_split)
 
-    adjacency: torch.Tensor = torch.from_numpy(train_dataset.adjacency)  # type: ignore[no-any-return]
-
-    model = RigPropagationModel(config.model, adjacency=adjacency).to(device)
+    model = RigPropagationModel(config.model).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     use_workers = config.data.num_workers > 0

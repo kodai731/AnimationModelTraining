@@ -9,13 +9,25 @@ import numpy as np
 
 from anim_ml.data.bvh_parser import parse_bvh
 from anim_ml.data.curve_extractor import CurveSample, extract_curve_samples
-from anim_ml.data.dataset_100style import find_100style_bvh_files, map_100style_to_smpl
-from anim_ml.data.dataset_cmu import find_cmu_bvh_files, map_cmu_to_smpl
+from anim_ml.data.dataset_100style import find_100style_bvh_files
+from anim_ml.data.dataset_cmu import find_cmu_bvh_files
 
 logger = logging.getLogger(__name__)
 
 SPLIT_RATIOS = {"train": 0.8, "val": 0.1, "test": 0.1}
 RANDOM_SEED = 42
+Z_UP_DATASETS = {"cmu"}
+
+
+def find_generic_bvh_files(data_dir: Path) -> list[Path]:
+    return sorted(
+        p for p in data_dir.rglob("*.bvh")
+        if "__MACOSX" not in p.parts and not p.name.startswith("._")
+    )
+
+
+def detect_z_up(dataset_type: str) -> bool:
+    return dataset_type in Z_UP_DATASETS
 
 
 def collect_bvh_files(dataset: str, raw_dir: Path) -> list[tuple[Path, str]]:
@@ -33,21 +45,26 @@ def collect_bvh_files(dataset: str, raw_dir: Path) -> list[tuple[Path, str]]:
             for p in find_100style_bvh_files(style_dir):
                 files.append((p, "100style"))
 
+    if dataset in ("accad", "all"):
+        accad_dir = raw_dir / "accad" / "bvh"
+        if accad_dir.exists():
+            for p in find_generic_bvh_files(accad_dir):
+                files.append((p, "accad"))
+
+    if dataset in ("generic", "all"):
+        generic_dir = raw_dir / "generic" / "bvh"
+        if generic_dir.exists():
+            for p in find_generic_bvh_files(generic_dir):
+                files.append((p, "generic"))
+
     return files
 
 
 def process_single_bvh(filepath: Path, dataset_type: str) -> list[CurveSample]:
     try:
-        z_up = dataset_type == "cmu"
+        z_up = detect_z_up(dataset_type)
         motion = parse_bvh(filepath, z_up=z_up)
-
-        mapped = map_cmu_to_smpl(motion) if dataset_type == "cmu" else map_100style_to_smpl(motion)
-
-        if mapped is None:
-            logger.warning("Skipping (insufficient joint mapping): %s", filepath.name)
-            return []
-
-        return extract_curve_samples(mapped)
+        return extract_curve_samples(motion)
 
     except Exception:
         logger.exception("Failed to process: %s", filepath)
@@ -148,7 +165,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Prepare curve training dataset")
     parser.add_argument(
-        "--dataset", choices=["cmu", "100style", "all"], default="all",
+        "--dataset",
+        choices=["cmu", "100style", "accad", "generic", "all"],
+        default="all",
     )
     parser.add_argument("--raw-dir", type=Path, default=get_raw_data_dir())
     parser.add_argument("--output-dir", type=Path, default=get_processed_data_dir())

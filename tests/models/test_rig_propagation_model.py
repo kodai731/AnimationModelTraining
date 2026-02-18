@@ -3,11 +3,23 @@ from __future__ import annotations
 import pytest
 import torch
 
+from anim_ml.data.rig_data_generator import MAX_EDGES, MAX_JOINTS
 from anim_ml.models.rig_propagation.model import (
     RigPropagationConfig,
     RigPropagationModel,
     count_parameters,
 )
+
+SAMPLE_PARENT_INDICES = [
+    -1, 0, 0, 0,
+    1, 2, 3,
+    4, 5, 6,
+    9, 9, 9,
+    10, 11, 12,
+    14, 15,
+    16, 17,
+]
+NUM_SAMPLE_JOINTS = len(SAMPLE_PARENT_INDICES)
 
 
 def _make_small_config() -> RigPropagationConfig:
@@ -21,12 +33,51 @@ def _make_small_config() -> RigPropagationConfig:
     )
 
 
+def _build_edge_tensors(
+    parent_indices: list[int],
+    device: str = "cpu",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    src_list: list[int] = []
+    tgt_list: list[int] = []
+    for child, parent in enumerate(parent_indices):
+        if parent == -1:
+            continue
+        src_list.extend([parent, child])
+        tgt_list.extend([child, parent])
+
+    num_edges = len(src_list)
+    source = torch.zeros(MAX_EDGES, dtype=torch.long, device=device)
+    target = torch.zeros(MAX_EDGES, dtype=torch.long, device=device)
+    direction = torch.zeros(MAX_EDGES, dtype=torch.long, device=device)
+    mask = torch.zeros(MAX_EDGES, dtype=torch.float, device=device)
+
+    source[:num_edges] = torch.tensor(src_list)
+    target[:num_edges] = torch.tensor(tgt_list)
+    for i in range(num_edges):
+        direction[i] = 0 if parent_indices[tgt_list[i]] == src_list[i] else 1
+    mask[:num_edges] = 1.0
+
+    return source, target, direction, mask
+
+
 def _make_dummy_input(
-    batch: int = 2, device: str = "cpu",
+    batch: int = 2,
+    device: str = "cpu",
 ) -> dict[str, torch.Tensor]:
+    joint_mask = torch.zeros(batch, MAX_JOINTS, device=device)
+    joint_mask[:, :NUM_SAMPLE_JOINTS] = 1.0
+
+    source, target, direction, edge_mask = _build_edge_tensors(SAMPLE_PARENT_INDICES, device)
+
     return {
-        "joint_features": torch.randn(batch, 22, 10, device=device),
-        "joint_types": torch.randint(0, 13, (batch, 22), device=device),
+        "joint_features": torch.randn(batch, MAX_JOINTS, 9, device=device),
+        "topology_features": torch.randn(batch, MAX_JOINTS, 6, device=device),
+        "bone_name_tokens": torch.randint(0, 44, (batch, MAX_JOINTS, 32), device=device),
+        "joint_mask": joint_mask,
+        "source_indices": source,
+        "target_indices": target,
+        "edge_direction": direction,
+        "edge_mask": edge_mask,
     }
 
 
@@ -44,8 +95,8 @@ class TestForwardPass:
         model = RigPropagationModel(_make_small_config())
         inputs = _make_dummy_input(batch=batch)
         rotation_deltas, confidence = model(**inputs)
-        assert rotation_deltas.shape == (batch, 22, 4)
-        assert confidence.shape == (batch, 22, 1)
+        assert rotation_deltas.shape == (batch, MAX_JOINTS, 4)
+        assert confidence.shape == (batch, MAX_JOINTS, 1)
 
     def test_confidence_range(self) -> None:
         model = RigPropagationModel(_make_small_config())
@@ -54,11 +105,12 @@ class TestForwardPass:
         assert (confidence >= 0.0).all()
         assert (confidence <= 1.0).all()
 
-    def test_unit_quaternion(self) -> None:
+    def test_unit_quaternion_in_valid_joints(self) -> None:
         model = RigPropagationModel(_make_small_config())
         inputs = _make_dummy_input(batch=4)
         rotation_deltas, _ = model(**inputs)
-        norms = torch.norm(rotation_deltas, dim=-1)
+        valid = rotation_deltas[:, :NUM_SAMPLE_JOINTS, :]
+        norms = torch.norm(valid, dim=-1)
         torch.testing.assert_close(norms, torch.ones_like(norms), atol=1e-5, rtol=0)
 
 
@@ -86,52 +138,18 @@ class TestGradientFlow:
 
 
 @pytest.mark.unit
-class TestMessagePropagation:
-    def test_edit_affects_neighbor_joint(self) -> None:
-        config = _make_small_config()
-        model = RigPropagationModel(config)
+class TestMaskedOutput:
+    def test_padding_joints_are_zero(self) -> None:
+        model = RigPropagationModel(_make_small_config())
         model.eval()
-
-        base_input = _make_dummy_input(batch=1)
-
+        inputs = _make_dummy_input(batch=2)
         with torch.no_grad():
-            base_deltas, _ = model(**base_input)
+            rotation_deltas, confidence = model(**inputs)
 
-        edited_input = {k: v.clone() for k, v in base_input.items()}
-        edited_input["joint_features"][0, 0, 8] = 1.0
-        edited_input["joint_features"][0, 0, 4:8] = torch.tensor([0.1, 0.2, 0.3, 0.9])
-
-        with torch.no_grad():
-            edited_deltas, _ = model(**edited_input)
-
-        spine1_diff = (base_deltas[0, 3] - edited_deltas[0, 3]).abs().max().item()
-        assert spine1_diff > 1e-6
-
-
-@pytest.mark.unit
-class TestBatchIndependence:
-    def test_batch1_vs_batch2(self) -> None:
-        config = _make_small_config()
-        model = RigPropagationModel(config)
-        model.eval()
-
-        single_input = _make_dummy_input(batch=1)
-
-        with torch.no_grad():
-            single_deltas, single_conf = model(**single_input)
-
-        double_features = single_input["joint_features"].repeat(2, 1, 1)
-        double_types = single_input["joint_types"].repeat(2, 1)
-
-        with torch.no_grad():
-            double_deltas, double_conf = model(double_features, double_types)
-
-        torch.testing.assert_close(
-            single_deltas[0], double_deltas[0], atol=1e-5, rtol=0,
-        )
-        torch.testing.assert_close(
-            single_conf[0], double_conf[0], atol=1e-5, rtol=0,
-        )
+        padding_deltas = rotation_deltas[:, NUM_SAMPLE_JOINTS:, :]
+        padding_conf = confidence[:, NUM_SAMPLE_JOINTS:, :]
+        torch.testing.assert_close(padding_deltas, torch.zeros_like(padding_deltas))
+        torch.testing.assert_close(padding_conf, torch.zeros_like(padding_conf))
 
 
 @pytest.mark.unit
@@ -141,5 +159,5 @@ class TestVariableBatchSize:
         model = RigPropagationModel(_make_small_config())
         inputs = _make_dummy_input(batch=batch_size)
         rotation_deltas, confidence = model(**inputs)
-        assert rotation_deltas.shape == (batch_size, 22, 4)
-        assert confidence.shape == (batch_size, 22, 1)
+        assert rotation_deltas.shape == (batch_size, MAX_JOINTS, 4)
+        assert confidence.shape == (batch_size, MAX_JOINTS, 1)

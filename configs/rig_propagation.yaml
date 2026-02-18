@@ -1,14 +1,19 @@
 model:
-  num_joints: 22
+  max_joints: 64
+  max_edges: 126
   node_feature_dim: 128
   edge_feature_dim: 32
   hidden_dim: 256
   ffn_dim: 2048
   num_message_passing_layers: 4
-  num_joint_types: 13
-  joint_type_embed_dim: 32
-  input_feature_dim: 10
+  input_feature_dim: 9
   dropout: 0.1
+  vocab_size: 64
+  token_length: 32
+  char_embed_dim: 32
+  conv_channels: 64
+  bone_context_dim: 64
+  topology_dim: 6
 
 training:
   batch_size: 128

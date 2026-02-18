@@ -14,7 +14,8 @@
       "WebFetch(domain:arxiv.org)",
       "WebFetch(domain:help.autodesk.com)",
       "Bash(find:*)",
-      "Bash(xargs:*)"
+      "Bash(xargs:*)",
+      "Bash(test:*)"
     ]
   }
 }

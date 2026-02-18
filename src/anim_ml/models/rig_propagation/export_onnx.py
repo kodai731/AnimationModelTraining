@@ -40,21 +40,42 @@ def export_to_onnx(
 ) -> None:
     model.eval()
     device = next(model.parameters()).device
-    num_joints = model.config.num_joints
+    max_joints = model.config.max_joints
+    max_edges = model.config.max_edges
     input_dim = model.config.input_feature_dim
 
-    dummy_features = torch.randn(2, num_joints, input_dim, device=device)
-    dummy_types = torch.zeros(2, num_joints, dtype=torch.long, device=device)
+    dummy_features = torch.randn(2, max_joints, input_dim, device=device)
+    dummy_topo = torch.randn(2, max_joints, 6, device=device)
+    dummy_tokens = torch.zeros(2, max_joints, 32, dtype=torch.long, device=device)
+    dummy_mask = torch.ones(2, max_joints, device=device)
+    dummy_src = torch.zeros(max_edges, dtype=torch.long, device=device)
+    dummy_tgt = torch.zeros(max_edges, dtype=torch.long, device=device)
+    dummy_edge_dir = torch.zeros(max_edges, dtype=torch.long, device=device)
+    dummy_edge_mask = torch.ones(max_edges, device=device)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    input_names = ["joint_features", "joint_types"]
+    input_names = [
+        "joint_features", "topology_features", "bone_name_tokens", "joint_mask",
+        "source_indices", "target_indices", "edge_direction", "edge_mask",
+    ]
     output_names = ["rotation_deltas", "confidence"]
-    dynamic_axes = {name: {0: "batch"} for name in input_names + output_names}
+
+    dynamic_axes = {
+        "joint_features": {0: "batch"},
+        "topology_features": {0: "batch"},
+        "bone_name_tokens": {0: "batch"},
+        "joint_mask": {0: "batch"},
+        "rotation_deltas": {0: "batch"},
+        "confidence": {0: "batch"},
+    }
 
     torch.onnx.export(  # type: ignore[reportUnknownMemberType]
         model,
-        (dummy_features, dummy_types),
+        (
+            dummy_features, dummy_topo, dummy_tokens, dummy_mask,
+            dummy_src, dummy_tgt, dummy_edge_dir, dummy_edge_mask,
+        ),
         str(output_path),
         opset_version=opset_version,
         input_names=input_names,
