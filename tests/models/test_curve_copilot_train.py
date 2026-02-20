@@ -21,9 +21,12 @@ from anim_ml.models.curve_copilot.train import (
     load_checkpoint,
     load_config,
     save_checkpoint,
+    train,
     train_one_epoch,
     validate,
 )
+
+import gc
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 
@@ -267,6 +270,116 @@ class TestConfigLoading:
         assert config.output.checkpoint_dir == "runs/curve_copilot"
         assert len(config.data.train_files) >= 1
         assert all(f.endswith(".h5") for f in config.data.train_files)
+
+
+@pytest.mark.unit
+class TestMemoryCleanupPreservesState:
+    def test_gc_preserves_model_and_optimizer(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path)
+        dataset = CurveCopilotDataset([hdf5_path], split="train")
+
+        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
+            dataset, batch_size=min(len(dataset), 64), shuffle=True, num_workers=0,
+        )
+
+        config = _make_train_config()
+        config.output.log_every_steps = 999
+        model = CurveCopilotModel(config.model)
+        device = torch.device("cpu")
+
+        steps_per_epoch = max(len(loader), 1)
+        optimizer, scheduler = create_optimizer_and_scheduler(
+            model, config.training, steps_per_epoch,
+        )
+
+        train_one_epoch(model, loader, optimizer, scheduler, config, device, 1)
+
+        weights_before = {k: v.clone() for k, v in model.state_dict().items()}
+        optimizer_state_before = optimizer.state_dict()
+        scheduler_lr_before = scheduler.get_last_lr()[0]
+
+        gc.collect()
+
+        weights_after = model.state_dict()
+        for key in weights_before:
+            assert torch.equal(weights_before[key], weights_after[key]), (
+                f"Model weight '{key}' changed after gc.collect()"
+            )
+
+        scheduler_lr_after = scheduler.get_last_lr()[0]
+        assert scheduler_lr_before == scheduler_lr_after
+
+        optimizer_state_after = optimizer.state_dict()
+        assert len(optimizer_state_before["param_groups"]) == len(optimizer_state_after["param_groups"])
+
+        dataset.close()
+
+    def test_training_continues_after_gc(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path)
+        dataset = CurveCopilotDataset([hdf5_path], split="train")
+
+        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
+            dataset, batch_size=min(len(dataset), 64), shuffle=True, num_workers=0,
+        )
+
+        config = _make_train_config()
+        config.training.learning_rate = 5e-3
+        config.output.log_every_steps = 999
+        model = CurveCopilotModel(config.model)
+        device = torch.device("cpu")
+
+        steps_per_epoch = max(len(loader), 1)
+        optimizer, scheduler = create_optimizer_and_scheduler(
+            model, config.training, steps_per_epoch,
+        )
+
+        epoch_losses = []
+        for epoch in range(1, 6):
+            metrics = train_one_epoch(model, loader, optimizer, scheduler, config, device, epoch)
+            epoch_losses.append(metrics["loss/train"])
+            gc.collect()
+
+        dataset.close()
+        assert epoch_losses[-1] < epoch_losses[0], (
+            f"Loss did not decrease across epochs with gc.collect(): {epoch_losses}"
+        )
+
+    def test_dataloader_survives_gc(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path)
+        dataset = CurveCopilotDataset([hdf5_path], split="train")
+
+        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
+            dataset, batch_size=min(len(dataset), 64), shuffle=True, num_workers=0,
+        )
+
+        first_batch = next(iter(loader))
+        assert "context_keyframes" in first_batch
+
+        gc.collect()
+
+        second_batch = next(iter(loader))
+        assert "context_keyframes" in second_batch
+        assert first_batch["context_keyframes"].shape == second_batch["context_keyframes"].shape
+
+        dataset.close()
+
+    def test_full_train_with_memory_cleanup(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path)
+        config = _make_train_config()
+        config.training.epochs = 3
+        config.training.learning_rate = 5e-3
+        config.output.log_every_steps = 999
+        config.output.save_every_epochs = 1
+        config.data.train_files = [str(hdf5_path)]
+        config.data.num_workers = 0
+        config.output.checkpoint_dir = str(tmp_path / "runs")
+
+        train(config, device_override="cpu")
+
+        checkpoint_dir = tmp_path / "runs"
+        assert (checkpoint_dir / "last.pt").exists()
+        loaded = load_checkpoint(checkpoint_dir / "last.pt", torch.device("cpu"))
+        assert loaded["epoch"] == 3
 
 
 @pytest.mark.unit

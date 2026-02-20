@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -304,8 +305,15 @@ def train(
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     train_paths = [resolve_data_path(p) for p in config.data.train_files]
-    train_dataset = CurveCopilotDataset(train_paths, split="train")
-    val_dataset = CurveCopilotDataset(train_paths, split=config.data.val_split)
+    use_shared_memory = config.data.num_workers > 0
+
+    train_dataset = CurveCopilotDataset(
+        train_paths, split="train", use_shared_memory=use_shared_memory,
+    )
+    val_dataset = CurveCopilotDataset(
+        train_paths, split=config.data.val_split, use_shared_memory=use_shared_memory,
+    )
+    gc.collect()
 
     use_workers = config.data.num_workers > 0
     pin_memory = supports_pin_memory(device)
@@ -407,6 +415,10 @@ def train(
                 "train_loss": round(train_metrics["loss/train"], 6),
                 "val_loss": round(val_metrics["loss/val"], 6),
             })
+
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
 
             if patience > 0 and epochs_without_improvement >= patience:
                 print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)")

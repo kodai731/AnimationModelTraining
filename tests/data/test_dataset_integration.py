@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 
 import h5py
 import numpy as np
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 from anim_ml.data.bvh_parser import parse_bvh
 from anim_ml.data.curve_dataset import CurveCopilotDataset
@@ -155,4 +157,52 @@ class TestMissingSplit:
         hdf5_path = _create_test_hdf5(tmp_path)
         dataset = CurveCopilotDataset([hdf5_path], split="test")
         assert len(dataset) == 0
+        dataset.close()
+
+
+@pytest.mark.unit
+class TestMemoryOptimization:
+    def test_all_samples_accessible_after_chunks_freed(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path)
+        dataset = CurveCopilotDataset([hdf5_path], split="train", use_shared_memory=False)
+
+        for i in range(len(dataset)):
+            item = dataset[i]
+            assert item["context_keyframes"].shape == (8, 6)
+
+        dataset.close()
+
+    def test_shared_and_non_shared_data_match(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path)
+
+        ds_shared = CurveCopilotDataset([hdf5_path], split="train", use_shared_memory=True)
+        ds_plain = CurveCopilotDataset([hdf5_path], split="train", use_shared_memory=False)
+
+        assert len(ds_shared) == len(ds_plain)
+        for i in range(len(ds_shared)):
+            shared_item = ds_shared[i]
+            plain_item = ds_plain[i]
+            assert torch.equal(shared_item["context_keyframes"], plain_item["context_keyframes"])
+            assert torch.equal(shared_item["target"], plain_item["target"])
+            assert torch.equal(shared_item["property_type"], plain_item["property_type"])
+
+        ds_shared.close()
+        ds_plain.close()
+
+    def test_dataloader_works_after_gc(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path)
+        dataset = CurveCopilotDataset([hdf5_path], split="train", use_shared_memory=False)
+
+        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
+            dataset, batch_size=4, shuffle=False, num_workers=0,
+        )
+
+        gc.collect()
+
+        total = 0
+        for batch in loader:
+            total += batch["context_keyframes"].shape[0]
+            assert batch["context_keyframes"].ndim == 3
+
+        assert total == len(dataset)
         dataset.close()

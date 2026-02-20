@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,7 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
         hdf5_paths: list[Path],
         split: str = "train",
         unk_rate: float = 0.25,
+        use_shared_memory: bool = True,
     ) -> None:
         self._split = split
         self._unk_rate = unk_rate
@@ -64,7 +66,13 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
             self._topo = torch.cat(topo_chunks)
             self._name_tokens = torch.cat(name_token_chunks)
             self._query_time = torch.cat(query_time_chunks)
-            self._move_to_shared_memory()
+
+            del context_chunks, target_chunks, prop_type_chunks
+            del topo_chunks, name_token_chunks, query_time_chunks
+            gc.collect()
+
+            if use_shared_memory:
+                self._move_to_shared_memory()
         else:
             self._context = torch.empty(0)
             self._target = torch.empty(0)

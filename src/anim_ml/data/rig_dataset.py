@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 from typing import TYPE_CHECKING
 
@@ -23,7 +24,12 @@ def _load_tensor(
 
 
 class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
-    def __init__(self, hdf5_paths: list[Path], split: str = "train") -> None:
+    def __init__(
+        self,
+        hdf5_paths: list[Path],
+        split: str = "train",
+        use_shared_memory: bool = True,
+    ) -> None:
         features_chunks: list[torch.Tensor] = []
         topo_chunks: list[torch.Tensor] = []
         tokens_chunks: list[torch.Tensor] = []
@@ -83,7 +89,14 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
             self._target_indices = torch.cat(tgt_chunks)
             self._edge_direction = torch.cat(edge_dir_chunks)
             self._edge_mask = torch.cat(edge_mask_chunks)
-            self._move_to_shared_memory()
+
+            del features_chunks, topo_chunks, tokens_chunks, mask_chunks
+            del deltas_chunks, confidence_chunks
+            del src_chunks, tgt_chunks, edge_dir_chunks, edge_mask_chunks
+            gc.collect()
+
+            if use_shared_memory:
+                self._move_to_shared_memory()
         else:
             self._joint_features = torch.empty(0)
             self._topology_features = torch.empty(0)
