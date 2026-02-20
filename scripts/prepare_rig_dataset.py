@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import logging
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,7 @@ from anim_ml.data.rig_data_generator import (
     generate_rig_samples_from_motion,
     save_rig_samples_hdf5,
 )
+from anim_ml.utils.preparation_log import PreparationLog
 
 logger = logging.getLogger(__name__)
 
@@ -64,33 +67,78 @@ def process_single_bvh(
     filepath: Path,
     dataset_type: str,
     rng: np.random.Generator,
+    prep_log: PreparationLog,
 ) -> list:
     try:
         z_up = detect_z_up(dataset_type)
+
+        prep_log.log("parse_bvh_start", file=filepath.name, dataset=dataset_type)
         motion = parse_bvh(filepath, z_up=z_up)
-        return generate_rig_samples_from_motion(motion, rng=rng)
+        prep_log.log("parse_bvh_done", file=filepath.name, n_frames=motion.n_frames, n_joints=len(motion.joint_names))
+
+        prep_log.log("generate_samples_start", file=filepath.name)
+        samples = generate_rig_samples_from_motion(motion, rng=rng)
+        prep_log.log("generate_samples_done", file=filepath.name, n_samples=len(samples))
+
+        del motion
+        return samples
 
     except Exception:
         logger.exception("Failed to process: %s", filepath)
+        prep_log.log("process_bvh_error", file=filepath.name)
         return []
 
 
-def run_pipeline(dataset: str, raw_dir: Path, output_dir: Path, limit: int | None) -> None:
+def _estimate_samples_memory_mb(all_samples: list) -> float:
+    total_bytes = sys.getsizeof(all_samples)
+    for sample in all_samples:
+        total_bytes += sys.getsizeof(sample)
+        if hasattr(sample, "__dict__"):
+            for val in sample.__dict__.values():
+                if hasattr(val, "nbytes"):
+                    total_bytes += val.nbytes
+    return total_bytes / (1024 * 1024)
+
+
+def run_pipeline(
+    dataset: str,
+    raw_dir: Path,
+    output_dir: Path,
+    limit: int | None,
+    prep_log: PreparationLog,
+) -> None:
     files = collect_bvh_files(dataset, raw_dir)
     if limit:
         files = files[:limit]
 
+    prep_log.log("pipeline_start", dataset=dataset, n_files=len(files))
     logger.info("Processing %d BVH files", len(files))
 
     rng = np.random.default_rng(42)
     all_samples: list = []
 
-    for filepath, ds_type in files:
-        samples = process_single_bvh(filepath, ds_type, rng)
+    for i, (filepath, ds_type) in enumerate(files):
+        samples = process_single_bvh(filepath, ds_type, rng, prep_log)
         if samples:
             all_samples.extend(samples)
             logger.info("  %s: %d samples", filepath.name, len(samples))
 
+        if (i + 1) % 10 == 0:
+            gc.collect()
+            samples_mb = _estimate_samples_memory_mb(all_samples)
+            prep_log.log(
+                "progress",
+                files_done=i + 1,
+                total_files=len(files),
+                total_samples=len(all_samples),
+                samples_est_mb=round(samples_mb, 1),
+            )
+
+    prep_log.log(
+        "all_bvh_done",
+        total_samples=len(all_samples),
+        samples_est_mb=round(_estimate_samples_memory_mb(all_samples), 1),
+    )
     logger.info("Total samples: %d", len(all_samples))
 
     if not all_samples:
@@ -98,7 +146,11 @@ def run_pipeline(dataset: str, raw_dir: Path, output_dir: Path, limit: int | Non
         return
 
     output_path = output_dir / f"{dataset}_rig.h5"
+    prep_log.log("save_hdf5_start", output=str(output_path))
     save_rig_samples_hdf5(all_samples, output_path)
+    del all_samples
+    gc.collect()
+    prep_log.log("save_hdf5_done", output=str(output_path))
     logger.info("Saved to %s", output_path)
 
 
@@ -117,7 +169,11 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    run_pipeline(args.dataset, args.raw_dir, args.output_dir, args.limit)
+
+    prep_log = PreparationLog("prepare_rig")
+    prep_log.log("main_started", dataset=args.dataset)
+    run_pipeline(args.dataset, args.raw_dir, args.output_dir, args.limit, prep_log)
+    prep_log.log("main_finished")
 
 
 if __name__ == "__main__":
