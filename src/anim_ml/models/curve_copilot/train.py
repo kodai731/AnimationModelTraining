@@ -194,7 +194,7 @@ def train_one_epoch(
 
         if (step + 1) % config.output.log_every_steps == 0:
             avg = total_loss / num_batches
-            print(f"  epoch {epoch} step {step + 1}: loss={avg:.4f}")
+            print(f"  epoch {epoch} step {step + 1}: loss={avg:.4f}", flush=True)
 
     return {"loss/train": total_loss / max(num_batches, 1)}
 
@@ -299,18 +299,19 @@ def train(
     resume_path: str | Path | None = None,
     device_override: str | None = None,
 ) -> None:
+    print("[curve_copilot] train() entered", flush=True)
     device = detect_training_device(device_override)
-    print(f"Using device: {device}")
+    print(f"Using device: {device}", flush=True)
 
     prep_log = PreparationLog("curve_copilot")
-    print(f"Preparation log: {prep_log.path}")
+    print(f"Preparation log: {prep_log.path}", flush=True)
 
     prep_log.log("train_start", device=str(device),
                  num_workers=config.data.num_workers,
                  batch_size=config.training.batch_size)
 
     model = CurveCopilotModel(config.model).to(device)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
     prep_log.log("model_created", params=sum(p.numel() for p in model.parameters()))
 
     train_paths = [resolve_data_path(p) for p in config.data.train_files]
@@ -359,7 +360,7 @@ def train(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     timing_log = TimingLog("curve_copilot")
-    print(f"Timing log: {timing_log.path}")
+    print(f"Timing log: {timing_log.path}", flush=True)
     prep_log.log("preparation_complete", steps_per_epoch=steps_per_epoch)
 
     best_val_loss = float("inf")
@@ -376,13 +377,13 @@ def train(
         start_epoch = ckpt["epoch"] + 1
         best_val_loss = ckpt.get("best_val_loss", float("inf"))
         epochs_without_improvement = ckpt.get("epochs_without_improvement", 0)
-        print(f"Resumed from epoch {ckpt['epoch']} (best_val_loss={best_val_loss:.4f})")
+        print(f"Resumed from epoch {ckpt['epoch']} (best_val_loss={best_val_loss:.4f})", flush=True)
 
     epoch = start_epoch - 1
 
     try:
         for epoch in range(start_epoch, config.training.epochs + 1):
-            print(f"Epoch {epoch}/{config.training.epochs}")
+            print(f"Epoch {epoch}/{config.training.epochs}", flush=True)
 
             with TimingLog.measure() as train_time:
                 train_metrics = train_one_epoch(
@@ -394,7 +395,7 @@ def train(
 
             all_metrics = {**train_metrics, **val_metrics}
             print(f"  train_loss={train_metrics['loss/train']:.4f}"
-                  f"  val_loss={val_metrics['loss/val']:.4f}")
+                  f"  val_loss={val_metrics['loss/val']:.4f}", flush=True)
 
             checkpoint_time_sec = 0.0
 
@@ -437,11 +438,11 @@ def train(
                 torch.cuda.empty_cache()
 
             if patience > 0 and epochs_without_improvement >= patience:
-                print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)")
+                print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)", flush=True)
                 break
 
     except KeyboardInterrupt:
-        print(f"\nTraining interrupted at epoch {epoch}.")
+        print(f"\nTraining interrupted at epoch {epoch}.", flush=True)
 
     if epoch > 0:
         save_checkpoint(
@@ -449,10 +450,10 @@ def train(
             checkpoint_dir / "last.pt", best_val_loss,
             epochs_without_improvement,
         )
-        print(f"Saved last.pt (epoch {epoch}).")
+        print(f"Saved last.pt (epoch {epoch}).", flush=True)
 
     if best_val_loss < float("inf"):
-        print(f"Best val loss: {best_val_loss:.4f} (best.pt)")
+        print(f"Best val loss: {best_val_loss:.4f} (best.pt)", flush=True)
 
 
 def main() -> None:
