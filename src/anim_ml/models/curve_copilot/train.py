@@ -17,6 +17,7 @@ from anim_ml.models.curve_copilot.model import CurveCopilotConfig, CurveCopilotM
 from anim_ml.paths import resolve_data_path
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
 from anim_ml.utils.optimizer import DmlAdamW
+from anim_ml.utils.preparation_log import PreparationLog
 from anim_ml.utils.timing_log import TimingLog
 
 
@@ -301,23 +302,36 @@ def train(
     device = detect_training_device(device_override)
     print(f"Using device: {device}")
 
+    prep_log = PreparationLog("curve_copilot")
+    print(f"Preparation log: {prep_log.path}")
+
+    prep_log.log("train_start", device=str(device),
+                 num_workers=config.data.num_workers,
+                 batch_size=config.training.batch_size)
+
     model = CurveCopilotModel(config.model).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    prep_log.log("model_created", params=sum(p.numel() for p in model.parameters()))
 
     train_paths = [resolve_data_path(p) for p in config.data.train_files]
     use_shared_memory = config.data.num_workers > 0
 
     train_dataset = CurveCopilotDataset(
         train_paths, split="train", use_shared_memory=use_shared_memory,
+        prep_log=prep_log,
     )
     val_dataset = CurveCopilotDataset(
         train_paths, split=config.data.val_split, use_shared_memory=use_shared_memory,
+        prep_log=prep_log,
     )
     gc.collect()
+    prep_log.log("datasets_ready",
+                 train_samples=len(train_dataset), val_samples=len(val_dataset))
 
     use_workers = config.data.num_workers > 0
     pin_memory = supports_pin_memory(device)
 
+    prep_log.log("dataloader_create_start")
     train_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
         train_dataset,
         batch_size=config.training.batch_size,
@@ -334,6 +348,7 @@ def train(
         pin_memory=pin_memory,
         persistent_workers=use_workers,
     )
+    prep_log.log("dataloader_create_done")
 
     steps_per_epoch = max(len(train_loader), 1)
     optimizer, scheduler = create_optimizer_and_scheduler(
@@ -345,6 +360,7 @@ def train(
 
     timing_log = TimingLog("curve_copilot")
     print(f"Timing log: {timing_log.path}")
+    prep_log.log("preparation_complete", steps_per_epoch=steps_per_epoch)
 
     best_val_loss = float("inf")
     epochs_without_improvement = 0

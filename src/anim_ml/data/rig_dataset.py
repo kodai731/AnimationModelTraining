@@ -14,6 +14,8 @@ from torch.utils.data import Dataset
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from anim_ml.utils.preparation_log import PreparationLog
+
 
 def _load_tensor(
     grp: h5py.Group,  # type: ignore[type-arg]
@@ -29,7 +31,12 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         hdf5_paths: list[Path],
         split: str = "train",
         use_shared_memory: bool = True,
+        prep_log: PreparationLog | None = None,
     ) -> None:
+        if prep_log:
+            prep_log.log("rig_dataset_init_start", split=split,
+                         num_files=len(hdf5_paths), use_shared_memory=use_shared_memory)
+
         features_chunks: list[torch.Tensor] = []
         topo_chunks: list[torch.Tensor] = []
         tokens_chunks: list[torch.Tensor] = []
@@ -41,9 +48,14 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         edge_dir_chunks: list[torch.Tensor] = []
         edge_mask_chunks: list[torch.Tensor] = []
 
-        for path in hdf5_paths:
+        for i, path in enumerate(hdf5_paths):
+            if prep_log:
+                prep_log.log("rig_hdf5_load_start", file_index=i, path=str(path))
+
             with h5py.File(path, "r") as f:
                 if split not in f:
+                    if prep_log:
+                        prep_log.log("rig_hdf5_split_missing", file_index=i)
                     continue
 
                 grp: h5py.Group = f[split]  # type: ignore[assignment]
@@ -78,7 +90,14 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
                     _load_tensor(grp, "edge_mask", np.float32),
                 )
 
+            if prep_log:
+                prep_log.log("rig_hdf5_load_done", file_index=i,
+                             samples=len(features_chunks[-1]))
+
         if features_chunks:
+            if prep_log:
+                prep_log.log("rig_torch_cat_start", num_chunks=len(features_chunks))
+
             self._joint_features = torch.cat(features_chunks)
             self._topology_features = torch.cat(topo_chunks)
             self._bone_name_tokens = torch.cat(tokens_chunks)
@@ -90,13 +109,32 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
             self._edge_direction = torch.cat(edge_dir_chunks)
             self._edge_mask = torch.cat(edge_mask_chunks)
 
+            if prep_log:
+                prep_log.log_tensor_info("rig_torch_cat_done", {
+                    "joint_features": self._joint_features,
+                    "topology_features": self._topology_features,
+                    "bone_name_tokens": self._bone_name_tokens,
+                    "joint_mask": self._joint_mask,
+                    "target_deltas": self._target_deltas,
+                    "confidence_targets": self._confidence_targets,
+                    "source_indices": self._source_indices,
+                    "target_indices": self._target_indices,
+                })
+
             del features_chunks, topo_chunks, tokens_chunks, mask_chunks
             del deltas_chunks, confidence_chunks
             del src_chunks, tgt_chunks, edge_dir_chunks, edge_mask_chunks
             gc.collect()
 
+            if prep_log:
+                prep_log.log("rig_chunks_freed")
+
             if use_shared_memory:
+                if prep_log:
+                    prep_log.log("rig_share_memory_start")
                 self._move_to_shared_memory()
+                if prep_log:
+                    prep_log.log("rig_share_memory_done")
         else:
             self._joint_features = torch.empty(0)
             self._topology_features = torch.empty(0)
@@ -108,6 +146,10 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
             self._target_indices = torch.empty(0, dtype=torch.int64)
             self._edge_direction = torch.empty(0, dtype=torch.int64)
             self._edge_mask = torch.empty(0)
+
+        if prep_log:
+            prep_log.log("rig_dataset_init_done", split=split,
+                         total_samples=len(self._joint_features))
 
     def _move_to_shared_memory(self) -> None:
         if len(self._joint_features) == 0:
