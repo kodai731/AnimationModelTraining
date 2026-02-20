@@ -296,15 +296,15 @@ def _migrate_mha_keys(state_dict: dict[str, Any]) -> dict[str, Any]:
 
 def train(
     config: TrainConfig,
+    prep_log: PreparationLog,
     resume_path: str | Path | None = None,
     device_override: str | None = None,
 ) -> None:
-    print("[curve_copilot] train() entered", flush=True)
+    prep_log.log("train_func_entered")
+
     device = detect_training_device(device_override)
     print(f"Using device: {device}", flush=True)
-
-    prep_log = PreparationLog("curve_copilot")
-    print(f"Preparation log: {prep_log.path}", flush=True)
+    prep_log.log("device_detected", device=str(device))
 
     prep_log.log("train_start", device=str(device),
                  num_workers=config.data.num_workers,
@@ -457,14 +457,21 @@ def train(
 
 
 def main() -> None:
+    prep_log = PreparationLog("curve_copilot")
+    prep_log.log("main_started")
+
     parser = argparse.ArgumentParser(description="Train Curve Copilot model")
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
+    prep_log.log("args_parsed", config=args.config, resume=args.resume, device=args.device)
 
     config = load_config(args.config)
-    train(config, resume_path=args.resume, device_override=args.device)
+    prep_log.log("config_loaded", num_train_files=len(config.data.train_files),
+                 num_workers=config.data.num_workers, batch_size=config.training.batch_size)
+
+    train(config, prep_log, resume_path=args.resume, device_override=args.device)
 
 
 if __name__ == "__main__":

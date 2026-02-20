@@ -25,6 +25,7 @@ from anim_ml.models.rig_propagation.train import (
     train_one_epoch,
     validate,
 )
+from anim_ml.utils.preparation_log import PreparationLog
 
 import gc
 
@@ -359,7 +360,7 @@ class TestMemoryCleanupPreservesState:
         config.data.num_workers = 0
         config.output.checkpoint_dir = str(tmp_path / "runs")
 
-        train(config, device_override="cpu")
+        train(config, PreparationLog("rig_propagation_test"), device_override="cpu")
 
         checkpoint_dir = tmp_path / "runs"
         assert (checkpoint_dir / "last.pt").exists()
