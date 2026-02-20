@@ -107,11 +107,14 @@ class PreparationLog:
         line = json.dumps(record, default=str)
         with open(self._path, "a") as f:
             f.write(line + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
         print(f"[prep] {event} | rss={record['rss_mb']}MB"
               + (f" shm_used={record.get('shm_used_mb', '?')}MB" if "shm_used_mb" in record else "")
               + (f" mem_avail={record.get('mem_available_mb', '?')}MB" if "mem_available_mb" in record else "")
-              + (f" | {kwargs}" if kwargs else ""))
+              + (f" | {kwargs}" if kwargs else ""),
+              flush=True)
 
     def log_tensor_info(self, event: str, tensors: dict[str, torch.Tensor]) -> None:
         sizes = {name: round(_tensor_size_mb(t), 2) for name, t in tensors.items()}
