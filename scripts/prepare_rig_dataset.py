@@ -74,7 +74,7 @@ def process_single_bvh(
 
         prep_log.log("parse_bvh_start", file=filepath.name, dataset=dataset_type)
         motion = parse_bvh(filepath, z_up=z_up)
-        prep_log.log("parse_bvh_done", file=filepath.name, n_frames=motion.n_frames, n_joints=len(motion.joint_names))
+        prep_log.log("parse_bvh_done", file=filepath.name, n_frames=motion.positions.shape[0], n_joints=len(motion.joint_names))
 
         prep_log.log("generate_samples_start", file=filepath.name)
         samples = generate_rig_samples_from_motion(motion, rng=rng)
