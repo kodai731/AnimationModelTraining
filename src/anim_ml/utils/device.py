@@ -16,7 +16,7 @@ def detect_training_device(override: str | None = None) -> torch.device:
     try:
         import torch_directml
         return torch_directml.device()
-    except ImportError:
+    except (ImportError, OSError):
         pass
 
     return torch.device("cpu")
