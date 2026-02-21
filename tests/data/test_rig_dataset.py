@@ -180,36 +180,46 @@ class TestDataLoaderCompatibility:
 
 @pytest.mark.unit
 class TestMemoryOptimization:
-    def test_all_samples_accessible_after_chunks_freed(self, tmp_path: Path) -> None:
+    def test_full_preload(self, tmp_path: Path) -> None:
         hdf5_path = _create_test_hdf5(tmp_path, num_samples=20)
-        dataset = RigPropagationDataset([hdf5_path], split="train", use_shared_memory=False)
+        dataset = RigPropagationDataset([hdf5_path], split="train")
 
+        assert dataset.is_fully_loaded
+        assert len(dataset) == dataset.total_count
         for i in range(len(dataset)):
             item = dataset[i]
             assert item["joint_features"].shape == (MAX_JOINTS, 9)
 
         dataset.close()
 
-    def test_shared_and_non_shared_data_match(self, tmp_path: Path) -> None:
-        hdf5_path = _create_test_hdf5(tmp_path, num_samples=10)
+    def test_chunk_preload_with_small_budget(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path, num_samples=20)
+        dataset = RigPropagationDataset([hdf5_path], split="train", cache_budget_bytes=1)
 
-        ds_shared = RigPropagationDataset([hdf5_path], split="train", use_shared_memory=True)
-        ds_plain = RigPropagationDataset([hdf5_path], split="train", use_shared_memory=False)
+        assert len(dataset) == 1
+        assert dataset.total_count == 20
+        assert not dataset.is_fully_loaded
 
-        assert len(ds_shared) == len(ds_plain)
-        for i in range(len(ds_shared)):
-            shared_item = ds_shared[i]
-            plain_item = ds_plain[i]
-            assert torch.equal(shared_item["joint_features"], plain_item["joint_features"])
-            assert torch.equal(shared_item["target_deltas"], plain_item["target_deltas"])
-            assert torch.equal(shared_item["bone_name_tokens"], plain_item["bone_name_tokens"])
+        item = dataset[0]
+        assert item["joint_features"].shape == (MAX_JOINTS, 9)
 
-        ds_shared.close()
-        ds_plain.close()
+        dataset.close()
+
+    def test_reload_chunk_cycles_data(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path, num_samples=20)
+        dataset = RigPropagationDataset([hdf5_path], split="train", cache_budget_bytes=1)
+
+        first_item = dataset[0]["joint_features"].clone()
+        dataset.reload_chunk()
+
+        second_item = dataset[0]["joint_features"].clone()
+        assert not torch.equal(first_item, second_item)
+
+        dataset.close()
 
     def test_dataloader_works_after_gc(self, tmp_path: Path) -> None:
         hdf5_path = _create_test_hdf5(tmp_path, num_samples=10)
-        dataset = RigPropagationDataset([hdf5_path], split="train", use_shared_memory=False)
+        dataset = RigPropagationDataset([hdf5_path], split="train")
 
         loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
             dataset, batch_size=4, shuffle=False, num_workers=0,

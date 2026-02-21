@@ -15,7 +15,8 @@
       "WebFetch(domain:help.autodesk.com)",
       "Bash(find:*)",
       "Bash(xargs:*)",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "Bash(ls:*)"
     ]
   }
 }

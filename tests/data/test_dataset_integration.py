@@ -162,36 +162,58 @@ class TestMissingSplit:
 
 @pytest.mark.unit
 class TestMemoryOptimization:
-    def test_all_samples_accessible_after_chunks_freed(self, tmp_path: Path) -> None:
+    def test_full_preload(self, tmp_path: Path) -> None:
         hdf5_path = _create_test_hdf5(tmp_path)
-        dataset = CurveCopilotDataset([hdf5_path], split="train", use_shared_memory=False)
+        dataset = CurveCopilotDataset([hdf5_path], split="train")
 
+        assert dataset.is_fully_loaded
+        assert len(dataset) == dataset.total_count
         for i in range(len(dataset)):
             item = dataset[i]
             assert item["context_keyframes"].shape == (8, 6)
 
         dataset.close()
 
-    def test_shared_and_non_shared_data_match(self, tmp_path: Path) -> None:
+    def test_chunk_preload_with_small_budget(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path)
+        dataset = CurveCopilotDataset([hdf5_path], split="train", cache_budget_bytes=1)
+
+        assert len(dataset) == 1
+        assert dataset.total_count > 1
+        assert not dataset.is_fully_loaded
+
+        item = dataset[0]
+        assert item["context_keyframes"].shape == (8, 6)
+
+        dataset.close()
+
+    def test_reload_chunk_matches_full_load(self, tmp_path: Path) -> None:
         hdf5_path = _create_test_hdf5(tmp_path)
 
-        ds_shared = CurveCopilotDataset([hdf5_path], split="train", use_shared_memory=True)
-        ds_plain = CurveCopilotDataset([hdf5_path], split="train", use_shared_memory=False)
+        full_ds = CurveCopilotDataset([hdf5_path], split="val")
+        total = full_ds.total_count
+        full_targets = [full_ds[i]["target"].clone() for i in range(total)]
+        full_ds.close()
 
-        assert len(ds_shared) == len(ds_plain)
-        for i in range(len(ds_shared)):
-            shared_item = ds_shared[i]
-            plain_item = ds_plain[i]
-            assert torch.equal(shared_item["context_keyframes"], plain_item["context_keyframes"])
-            assert torch.equal(shared_item["target"], plain_item["target"])
-            assert torch.equal(shared_item["property_type"], plain_item["property_type"])
+        chunked_ds = CurveCopilotDataset(
+            [hdf5_path], split="val", cache_budget_bytes=1,
+        )
+        assert len(chunked_ds) == 1
 
-        ds_shared.close()
-        ds_plain.close()
+        chunk_targets = []
+        for i in range(total):
+            chunk_targets.append(chunked_ds[0]["target"].clone())
+            if i < total - 1:
+                chunked_ds.reload_chunk()
+
+        for i in range(total):
+            assert torch.equal(full_targets[i], chunk_targets[i])
+
+        chunked_ds.close()
 
     def test_dataloader_works_after_gc(self, tmp_path: Path) -> None:
         hdf5_path = _create_test_hdf5(tmp_path)
-        dataset = CurveCopilotDataset([hdf5_path], split="train", use_shared_memory=False)
+        dataset = CurveCopilotDataset([hdf5_path], split="train")
 
         loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
             dataset, batch_size=4, shuffle=False, num_workers=0,

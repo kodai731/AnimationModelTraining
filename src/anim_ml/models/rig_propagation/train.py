@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,9 +17,10 @@ from anim_ml.data.rig_dataset import RigPropagationDataset
 from anim_ml.models.rig_propagation.model import RigPropagationConfig, RigPropagationModel
 from anim_ml.paths import resolve_data_path
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
+from anim_ml.utils.memory_budget import resolve_cache_budget_bytes
 from anim_ml.utils.optimizer import DmlAdamW
 from anim_ml.utils.preparation_log import PreparationLog
-from anim_ml.utils.timing_log import TimingLog
+from anim_ml.utils.timing_log import BatchTimingLog, TimingLog
 
 
 @dataclass
@@ -158,12 +160,19 @@ def train_one_epoch(
     config: TrainConfig,
     device: torch.device,
     epoch: int,
+    batch_timing: BatchTimingLog | None = None,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
     num_batches = 0
 
+    if batch_timing:
+        batch_timing.begin_epoch(epoch)
+
     for step, batch in enumerate(dataloader):
+        if batch_timing:
+            data_wait = time.perf_counter() - batch_timing._data_start
+
         joint_features = batch["joint_features"].to(device, non_blocking=True)
         topology_features = batch["topology_features"].to(device, non_blocking=True)
         bone_name_tokens = batch["bone_name_tokens"].to(device, non_blocking=True)
@@ -174,6 +183,8 @@ def train_one_epoch(
         target_indices = batch["target_indices"][0].to(device, non_blocking=True)
         edge_direction = batch["edge_direction"][0].to(device, non_blocking=True)
         edge_mask = batch["edge_mask"][0].to(device, non_blocking=True).float()
+
+        compute_start = time.perf_counter()
 
         rotation_deltas, confidence = model(
             joint_features, topology_features, bone_name_tokens, joint_mask,
@@ -190,12 +201,20 @@ def train_one_epoch(
         optimizer.step()  # type: ignore[no-untyped-call]
         scheduler.step()
 
+        if batch_timing:
+            compute_elapsed = time.perf_counter() - compute_start
+            batch_timing.record_step(step, data_wait, compute_elapsed)
+            batch_timing.mark_data_start()
+
         total_loss += metrics["loss/total"]
         num_batches += 1
 
         if (step + 1) % config.output.log_every_steps == 0:
             avg = total_loss / num_batches
             print(f"  epoch {epoch} step {step + 1}: loss={avg:.4f}", flush=True)
+
+    if batch_timing:
+        batch_timing.end_epoch()
 
     return {"loss/train": total_loss / max(num_batches, 1)}
 
@@ -296,17 +315,20 @@ def train(
                  batch_size=config.training.batch_size)
 
     train_paths = [resolve_data_path(p) for p in config.data.train_files]
-    use_shared_memory = config.data.num_workers > 0
+    cache_budget = resolve_cache_budget_bytes()
 
     train_dataset = RigPropagationDataset(
-        train_paths, split="train", use_shared_memory=use_shared_memory,
+        train_paths, split="train", cache_budget_bytes=cache_budget,
         prep_log=prep_log,
     )
     val_dataset = RigPropagationDataset(
-        train_paths, split=config.data.val_split, use_shared_memory=use_shared_memory,
+        train_paths, split=config.data.val_split, cache_budget_bytes=cache_budget,
         prep_log=prep_log,
     )
     gc.collect()
+
+    train_status = "fully loaded" if train_dataset.is_fully_loaded else "chunked"
+    print(f"Train: {train_dataset.total_count} samples ({train_status})", flush=True)
     prep_log.log("datasets_ready",
                  train_samples=len(train_dataset), val_samples=len(val_dataset))
 
@@ -314,25 +336,23 @@ def train(
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
     prep_log.log("model_created", params=sum(p.numel() for p in model.parameters()))
 
-    use_workers = config.data.num_workers > 0
     pin_memory = supports_pin_memory(device)
 
-    prep_log.log("dataloader_create_start")
+    prep_log.log("dataloader_create_start", num_workers=0)
     train_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
         train_dataset,
         batch_size=config.training.batch_size,
         shuffle=True,
-        num_workers=config.data.num_workers,
+        num_workers=0,
         pin_memory=pin_memory,
-        persistent_workers=use_workers,
+        drop_last=True,
     )
     val_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
         val_dataset,
         batch_size=config.training.batch_size,
         shuffle=False,
-        num_workers=config.data.num_workers,
+        num_workers=0,
         pin_memory=pin_memory,
-        persistent_workers=use_workers,
     )
     prep_log.log("dataloader_create_done")
 
@@ -345,7 +365,9 @@ def train(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     timing_log = TimingLog("rig_propagation")
+    batch_timing = BatchTimingLog("rig_propagation")
     print(f"Timing log: {timing_log.path}", flush=True)
+    print(f"Batch timing log: {batch_timing.step_path}", flush=True)
     prep_log.log("preparation_complete", steps_per_epoch=steps_per_epoch)
 
     best_val_loss = float("inf")
@@ -367,11 +389,15 @@ def train(
 
     try:
         for epoch in range(start_epoch, config.training.epochs + 1):
+            if epoch > start_epoch and not train_dataset.is_fully_loaded:
+                train_dataset.reload_chunk()
+
             print(f"Epoch {epoch}/{config.training.epochs}", flush=True)
 
             with TimingLog.measure() as train_time:
                 train_metrics = train_one_epoch(
-                    model, train_loader, optimizer, scheduler, config, device, epoch,
+                    model, train_loader, optimizer, scheduler,
+                    config, device, epoch, batch_timing,
                 )
 
             with TimingLog.measure() as val_time:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import torch
 
 
@@ -24,3 +26,9 @@ def detect_training_device(override: str | None = None) -> torch.device:
 
 def supports_pin_memory(device: torch.device) -> bool:
     return device.type == "cuda"
+
+
+def resolve_num_workers(requested: int) -> int:
+    cpu_count = os.cpu_count() or 1
+    max_workers = max(cpu_count - 1, 1)
+    return min(requested, max_workers)

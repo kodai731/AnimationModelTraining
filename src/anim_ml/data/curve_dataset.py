@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import math
 import os
 from typing import TYPE_CHECKING
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
 import h5py  # type: ignore[import-untyped]
-import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -17,6 +17,20 @@ if TYPE_CHECKING:
 
 UNK_TOKEN = 1
 
+_FIELD_DTYPES: dict[str, torch.dtype] = {
+    "context_keyframes": torch.float32,
+    "target": torch.float32,
+    "property_type": torch.int64,
+    "topology_features": torch.float32,
+    "bone_name_tokens": torch.int64,
+    "query_time": torch.float32,
+}
+
+_DTYPE_BYTE_SIZES: dict[torch.dtype, int] = {
+    torch.float32: 4,
+    torch.int64: 8,
+}
+
 
 class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
     def __init__(
@@ -24,18 +38,19 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
         hdf5_paths: list[Path],
         split: str = "train",
         unk_rate: float = 0.25,
-        use_shared_memory: bool = True,
+        cache_budget_bytes: int = 0,
         prep_log: PreparationLog | None = None,
     ) -> None:
         self._split = split
         self._unk_rate = unk_rate
         self._paths: list[str] = []
         self._offsets: list[int] = []
-        self._handles: list[h5py.File | None] = []
+        self._file_counts: list[int] = []
 
         if prep_log:
             prep_log.log("curve_dataset_init_start", split=split, num_files=len(hdf5_paths))
 
+        per_sample_bytes = 0
         offset = 0
         for i, path in enumerate(hdf5_paths):
             with h5py.File(path, "r") as f:
@@ -43,27 +58,89 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
                     if prep_log:
                         prep_log.log("curve_hdf5_split_missing", file_index=i)
                     continue
-                n = len(f[split]["context_keyframes"])
+
+                grp = f[split]
+                n = len(grp["context_keyframes"])
+
+                if per_sample_bytes == 0:
+                    per_sample_bytes = _compute_per_sample_bytes(grp)
 
             self._paths.append(str(path))
             self._offsets.append(offset)
-            self._handles.append(None)
+            self._file_counts.append(n)
             offset += n
 
             if prep_log:
                 prep_log.log("curve_hdf5_indexed", file_index=i, samples=n)
 
-        self._total = offset
+        self._total_count = offset
+        self._per_sample_bytes = per_sample_bytes
+
+        chunk_size = self._total_count
+        if cache_budget_bytes > 0 and per_sample_bytes > 0 and self._total_count > 0:
+            budget_samples = cache_budget_bytes // per_sample_bytes
+            chunk_size = max(min(budget_samples, self._total_count), 1)
+
+        self._chunk_size = chunk_size
+        if self._chunk_size > 0:
+            self._num_chunks = math.ceil(self._total_count / self._chunk_size)
+        else:
+            self._num_chunks = 1
+        self._chunk_index = 0
+        self._cache: dict[str, torch.Tensor] = {}
+        self._loaded_count = 0
+
+        self._load_current_chunk()
 
         if prep_log:
-            prep_log.log("curve_dataset_init_done", split=split, total_samples=self._total)
+            prep_log.log(
+                "curve_dataset_init_done",
+                split=split,
+                total_samples=self._total_count,
+                loaded_samples=self._loaded_count,
+                fully_loaded=self.is_fully_loaded,
+            )
 
-    def _ensure_open(self, file_idx: int) -> h5py.File:
-        handle = self._handles[file_idx]
-        if handle is None:
-            handle = h5py.File(self._paths[file_idx], "r")
-            self._handles[file_idx] = handle
-        return handle
+    @property
+    def is_fully_loaded(self) -> bool:
+        return self._loaded_count >= self._total_count
+
+    @property
+    def total_count(self) -> int:
+        return self._total_count
+
+    def _load_current_chunk(self) -> None:
+        if self._total_count == 0 or self._chunk_size == 0:
+            self._loaded_count = 0
+            return
+
+        chunk_start = self._chunk_index * self._chunk_size
+        chunk_count = min(self._chunk_size, self._total_count - chunk_start)
+
+        buffers: dict[str, list[torch.Tensor]] = {key: [] for key in _FIELD_DTYPES}
+        remaining = chunk_count
+        pos = chunk_start
+
+        while remaining > 0:
+            file_idx, local_idx = self._locate(pos)
+            available = self._file_counts[file_idx] - local_idx
+            to_read = min(available, remaining)
+            end = local_idx + to_read
+
+            with h5py.File(self._paths[file_idx], "r") as f:
+                grp = f[self._split]
+                for key, dtype in _FIELD_DTYPES.items():
+                    buffers[key].append(torch.as_tensor(grp[key][local_idx:end], dtype=dtype))
+
+            remaining -= to_read
+            pos += to_read
+
+        self._cache = {key: torch.cat(parts) for key, parts in buffers.items()}
+
+        if self._cache["query_time"].ndim == 1:
+            self._cache["query_time"] = self._cache["query_time"].unsqueeze(-1)
+
+        self._loaded_count = chunk_count
 
     def _locate(self, index: int) -> tuple[int, int]:
         lo, hi = 0, len(self._offsets) - 1
@@ -76,36 +153,45 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
         return lo, index - self._offsets[lo]
 
     def __len__(self) -> int:
-        return self._total
+        return self._loaded_count
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        if index < 0 or index >= self._total:
-            msg = f"Index {index} out of range [0, {self._total})"
+        if index < 0 or index >= self._loaded_count:
+            msg = f"Index {index} out of range [0, {self._loaded_count})"
             raise IndexError(msg)
 
-        file_idx, local_idx = self._locate(index)
-        f = self._ensure_open(file_idx)
-        grp = f[self._split]
-
-        tokens = torch.from_numpy(np.array(grp["bone_name_tokens"][local_idx], dtype=np.int64))
+        tokens = self._cache["bone_name_tokens"][index].clone()
         if self._split == "train" and self._unk_rate > 0:
             tokens = _augment_bone_name_tokens(tokens, self._unk_rate)
 
         return {
-            "context_keyframes": torch.from_numpy(np.array(grp["context_keyframes"][local_idx], dtype=np.float32)),
-            "target": torch.from_numpy(np.array(grp["target"][local_idx], dtype=np.float32)),
-            "property_type": torch.tensor(int(grp["property_type"][local_idx]), dtype=torch.int64),
-            "topology_features": torch.from_numpy(np.array(grp["topology_features"][local_idx], dtype=np.float32)),
+            "context_keyframes": self._cache["context_keyframes"][index],
+            "target": self._cache["target"][index],
+            "property_type": self._cache["property_type"][index],
+            "topology_features": self._cache["topology_features"][index],
             "bone_name_tokens": tokens,
-            "query_time": torch.tensor([float(grp["query_time"][local_idx])], dtype=torch.float32),
+            "query_time": self._cache["query_time"][index],
         }
 
+    def reload_chunk(self) -> None:
+        if self.is_fully_loaded:
+            return
+        self._chunk_index = (self._chunk_index + 1) % self._num_chunks
+        self._load_current_chunk()
+
     def close(self) -> None:
-        for i, handle in enumerate(self._handles):
-            if handle is not None:
-                handle.close()
-                self._handles[i] = None
-        self._total = 0
+        self._cache.clear()
+        self._loaded_count = 0
+        self._total_count = 0
+
+
+def _compute_per_sample_bytes(grp: h5py.Group) -> int:
+    total = 0
+    for key, dtype in _FIELD_DTYPES.items():
+        ds = grp[key]
+        sample_elements = math.prod(ds.shape[1:]) if len(ds.shape) > 1 else 1
+        total += sample_elements * _DTYPE_BYTE_SIZES[dtype]
+    return total
 
 
 def _augment_bone_name_tokens(tokens: torch.Tensor, unk_rate: float) -> torch.Tensor:
