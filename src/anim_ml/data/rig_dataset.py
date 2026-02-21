@@ -119,6 +119,11 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         return cache_budget_bytes
 
     def _apply_chunk_size(self, effective_budget: int) -> None:
+        if self._memory_budget is not None and effective_budget <= 0:
+            self._chunk_size = 0
+            self._num_chunks = 1
+            return
+
         chunk_size = self._total_count
         if effective_budget > 0 and self._per_sample_bytes > 0 and self._total_count > 0:
             budget_samples = effective_budget // self._per_sample_bytes
