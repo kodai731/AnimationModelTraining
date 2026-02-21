@@ -25,6 +25,8 @@ class CurveCopilotConfig:
     bone_context_dim: int = 64
     topology_dim: int = 6
     periodic_time_encoding: bool = False
+    num_experts: int = 3
+    use_expert_mixing: bool = False
 
 
 class PeriodicTimeEncoder(nn.Module):
@@ -88,6 +90,39 @@ class CausalTransformerBlock(nn.Module):
         return x
 
 
+class GatingNetwork(nn.Module):
+    def __init__(
+        self, num_property_types: int, d_model: int, num_experts: int,
+    ) -> None:
+        super().__init__()
+        self.property_embedding = nn.Embedding(num_property_types, d_model)
+        self.gate_proj = nn.Linear(d_model, num_experts)
+
+    def forward(self, property_type: torch.Tensor) -> torch.Tensor:
+        emb = self.property_embedding(property_type)
+        return torch.softmax(self.gate_proj(emb), dim=-1)
+
+
+class PropertyAdaptiveBlock(nn.Module):
+    def __init__(
+        self, d_model: int, n_heads: int, d_ff: int, dropout: float, num_experts: int,
+    ) -> None:
+        super().__init__()
+        self.experts = nn.ModuleList([
+            CausalTransformerBlock(d_model, n_heads, d_ff, dropout)
+            for _ in range(num_experts)
+        ])
+
+    def forward(
+        self, x: torch.Tensor, mask: torch.Tensor, gate_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        expert_outputs = torch.stack(
+            [expert(x, mask) for expert in self.experts], dim=1,
+        )
+        weights = gate_weights.unsqueeze(-1).unsqueeze(-1)
+        return (expert_outputs * weights).sum(dim=1)
+
+
 class CurveCopilotModel(nn.Module):
     def __init__(self, config: CurveCopilotConfig | None = None) -> None:
         super().__init__()
@@ -118,10 +153,26 @@ class CurveCopilotModel(nn.Module):
         query_time_input_dim = 3 if config.periodic_time_encoding else 1
         self.query_time_projection = nn.Linear(query_time_input_dim, config.d_model)
 
-        self.blocks = nn.ModuleList([
-            CausalTransformerBlock(config.d_model, config.n_heads, config.d_ff, config.dropout)
-            for _ in range(config.n_layers)
-        ])
+        self.gating: GatingNetwork | None = None
+
+        if config.use_expert_mixing:
+            self.gating = GatingNetwork(
+                config.num_property_types, config.d_model, config.num_experts,
+            )
+            self.blocks = nn.ModuleList([
+                PropertyAdaptiveBlock(
+                    config.d_model, config.n_heads, config.d_ff,
+                    config.dropout, config.num_experts,
+                )
+                for _ in range(config.n_layers)
+            ])
+        else:
+            self.blocks = nn.ModuleList([
+                CausalTransformerBlock(
+                    config.d_model, config.n_heads, config.d_ff, config.dropout,
+                )
+                for _ in range(config.n_layers)
+            ])
 
         self.output_norm = nn.LayerNorm(config.d_model)
         self.prediction_head = nn.Linear(config.d_model, 6)
@@ -179,8 +230,14 @@ class CurveCopilotModel(nn.Module):
 
         causal_mask: torch.Tensor = self.causal_mask  # type: ignore[assignment]
         mask = causal_mask[:total_len, :total_len]
-        for block in self.blocks:
-            x = block(x, mask)
+
+        if self.gating is not None:
+            gate_weights = self.gating(property_type)
+            for block in self.blocks:
+                x = block(x, mask, gate_weights)
+        else:
+            for block in self.blocks:
+                x = block(x, mask)
 
         last_token = self.output_norm(x)[:, -1, :]
         prediction = self.prediction_head(last_token)

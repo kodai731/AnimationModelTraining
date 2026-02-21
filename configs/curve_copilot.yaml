@@ -6,6 +6,8 @@ model:
   max_seq: 8
   dropout: 0.1
   periodic_time_encoding: true
+  num_experts: 3
+  use_expert_mixing: true
 
 training:
   batch_size: 2048

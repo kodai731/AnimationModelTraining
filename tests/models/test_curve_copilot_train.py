@@ -269,6 +269,8 @@ class TestConfigLoading:
         assert config.training.loss_weights.value == 1.0
         assert config.data.val_split == "val"
         assert config.output.checkpoint_dir == "runs/curve_copilot"
+        assert config.model.use_expert_mixing is True
+        assert config.model.num_experts == 3
         assert len(config.data.train_files) >= 1
         assert all(f.endswith(".h5") for f in config.data.train_files)
 

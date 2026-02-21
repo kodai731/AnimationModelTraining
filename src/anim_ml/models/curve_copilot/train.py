@@ -4,7 +4,7 @@ import argparse
 import gc
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -276,22 +276,7 @@ def save_checkpoint(
         "metrics": metrics,
         "best_val_loss": best_val_loss,
         "epochs_without_improvement": epochs_without_improvement,
-        "config": {
-            "d_model": model.config.d_model,
-            "n_heads": model.config.n_heads,
-            "d_ff": model.config.d_ff,
-            "n_layers": model.config.n_layers,
-            "max_seq": model.config.max_seq,
-            "dropout": model.config.dropout,
-            "num_property_types": model.config.num_property_types,
-            "keyframe_dim": model.config.keyframe_dim,
-            "vocab_size": model.config.vocab_size,
-            "token_length": model.config.token_length,
-            "char_embed_dim": model.config.char_embed_dim,
-            "conv_channels": model.config.conv_channels,
-            "bone_context_dim": model.config.bone_context_dim,
-            "topology_dim": model.config.topology_dim,
-        },
+        "config": asdict(model.config),
     }, path)
 
 
