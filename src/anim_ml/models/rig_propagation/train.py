@@ -169,9 +169,10 @@ def train_one_epoch(
     if batch_timing:
         batch_timing.begin_epoch(epoch)
 
+    data_wait = 0.0
     for step, batch in enumerate(dataloader):
         if batch_timing:
-            data_wait = time.perf_counter() - batch_timing._data_start
+            data_wait = time.perf_counter() - batch_timing.data_start
 
         joint_features = batch["joint_features"].to(device, non_blocking=True)
         topology_features = batch["topology_features"].to(device, non_blocking=True)
@@ -219,7 +220,7 @@ def train_one_epoch(
     return {"loss/train": total_loss / max(num_batches, 1)}
 
 
-@torch.no_grad()
+@torch.no_grad()  # pyright: ignore[reportUntypedFunctionDecorator]
 def validate(
     model: RigPropagationModel,
     dataloader: DataLoader[dict[str, torch.Tensor]],
@@ -267,7 +268,7 @@ def save_checkpoint(
     best_val_loss: float = float("inf"),
 ) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
+    torch.save({  # pyright: ignore[reportUnknownMemberType]
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -455,7 +456,11 @@ def train(
                 torch.cuda.empty_cache()
 
             if patience > 0 and epochs_without_improvement >= patience:
-                print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)", flush=True)
+                print(
+                    f"Early stopping at epoch {epoch}"
+                    f" (no improvement for {patience} epochs)",
+                    flush=True,
+                )
                 break
 
     except KeyboardInterrupt:

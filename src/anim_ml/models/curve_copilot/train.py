@@ -6,7 +6,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -99,14 +99,15 @@ def compute_loss(
     value_loss = mse(prediction[:, 0], target[:, 1])
     tangent_loss = mse(prediction[:, 1:5], target[:, 2:6])
 
-    tangent_magnitude: torch.Tensor = torch.norm(target[:, 2:6], dim=1)  # type: ignore[assignment]
-    interp_target: torch.Tensor = (tangent_magnitude > 0.01).float()  # type: ignore[assignment]
+    tangent_norms = torch.norm(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        target[:, 2:6], dim=1,
+    )
+    tangent_magnitude = cast("torch.Tensor", tangent_norms)
+    interp_target = (tangent_magnitude > 0.01).float()
     logits = prediction[:, 5]
-    interp_loss = (
-        torch.clamp(logits, min=0)
-        - logits * interp_target
-        + torch.log1p(torch.exp(-torch.abs(logits)))
-    ).mean()
+    interp_loss = nn.functional.binary_cross_entropy_with_logits(
+        logits, interp_target,
+    )
 
     confidence_loss = mse(confidence, confidence_targets)
 
@@ -168,9 +169,10 @@ def train_one_epoch(
     if batch_timing:
         batch_timing.begin_epoch(epoch)
 
+    data_wait = 0.0
     for step, batch in enumerate(dataloader):
         if batch_timing:
-            data_wait = time.perf_counter() - batch_timing._data_start
+            data_wait = time.perf_counter() - batch_timing.data_start
 
         context = batch["context_keyframes"].to(device, non_blocking=True)
         prop_type = batch["property_type"].to(device, non_blocking=True)
@@ -218,7 +220,7 @@ def train_one_epoch(
     return {"loss/train": total_loss / max(num_batches, 1)}
 
 
-@torch.no_grad()
+@torch.no_grad()  # pyright: ignore[reportUntypedFunctionDecorator]
 def validate(
     model: CurveCopilotModel,
     dataloader: DataLoader[dict[str, torch.Tensor]],
@@ -266,7 +268,7 @@ def save_checkpoint(
     epochs_without_improvement: int = 0,
 ) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
+    torch.save({  # pyright: ignore[reportUnknownMemberType]
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -473,7 +475,11 @@ def train(
                 torch.cuda.empty_cache()
 
             if patience > 0 and epochs_without_improvement >= patience:
-                print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs)", flush=True)
+                print(
+                    f"Early stopping at epoch {epoch}"
+                    f" (no improvement for {patience} epochs)",
+                    flush=True,
+                )
                 break
 
     except KeyboardInterrupt:

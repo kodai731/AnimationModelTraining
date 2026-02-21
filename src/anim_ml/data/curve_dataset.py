@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
@@ -59,13 +59,18 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
         offset = 0
         for i, path in enumerate(hdf5_paths):
             with h5py.File(path, "r") as f:
-                if split not in f or "context_keyframes" not in f[split]:
+                if split not in f:
                     if prep_log:
                         prep_log.log("curve_hdf5_split_missing", file_index=i)
                     continue
 
-                grp = f[split]
-                n = len(grp["context_keyframes"])
+                grp = cast("h5py.Group", f[split])
+                if "context_keyframes" not in grp:
+                    if prep_log:
+                        prep_log.log("curve_hdf5_split_missing", file_index=i)
+                    continue
+
+                n = len(cast("h5py.Dataset", grp["context_keyframes"]))
 
                 if per_sample_bytes == 0:
                     per_sample_bytes = _compute_per_sample_bytes(grp)
@@ -141,9 +146,9 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
             parts: list[torch.Tensor] = []
             for file_idx, local_start, local_end in file_slices:
                 with h5py.File(self._paths[file_idx], "r") as f:
-                    parts.append(
-                        torch.as_tensor(f[self._split][key][local_start:local_end], dtype=dtype),
-                    )
+                    split_grp = cast("h5py.Group", f[self._split])
+                    ds = cast("h5py.Dataset", split_grp[key])
+                    parts.append(torch.as_tensor(ds[local_start:local_end], dtype=dtype))
             self._cache[key] = torch.cat(parts)
             del parts
 
@@ -229,8 +234,9 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
 def _compute_per_sample_bytes(grp: h5py.Group) -> int:
     total = 0
     for key, dtype in _FIELD_DTYPES.items():
-        ds = grp[key]
-        sample_elements = math.prod(ds.shape[1:]) if len(ds.shape) > 1 else 1
+        ds = cast("h5py.Dataset", grp[key])
+        shape = cast("tuple[int, ...]", ds.shape)  # pyright: ignore[reportUnknownMemberType]
+        sample_elements = math.prod(shape[1:]) if len(shape) > 1 else 1
         total += sample_elements * _DTYPE_BYTE_SIZES[dtype]
     return total
 

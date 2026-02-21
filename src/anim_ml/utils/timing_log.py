@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from anim_ml.paths import PROJECT_ROOT, get_shared_data_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
 LOG_DIR = PROJECT_ROOT / "log"
@@ -85,6 +85,10 @@ class BatchTimingLog:
     def summary_path(self) -> Path:
         return self._summary_path
 
+    @property
+    def data_start(self) -> float:
+        return self._data_start
+
     def mark_data_start(self) -> None:
         self._data_start = time.perf_counter()
 
@@ -136,7 +140,7 @@ class BatchTimingLog:
         }
         self._write_summary_row(summary)
 
-    def _write_step_row(self, row: dict[str, object]) -> None:
+    def _write_step_row(self, row: Mapping[str, object]) -> None:
         if not self._step_header_written:
             with open(self._step_path, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=self._STEP_FIELDS)
@@ -148,7 +152,7 @@ class BatchTimingLog:
                 writer = csv.DictWriter(f, fieldnames=self._STEP_FIELDS)
                 writer.writerow(row)
 
-    def _write_summary_row(self, row: dict[str, object]) -> None:
+    def _write_summary_row(self, row: Mapping[str, object]) -> None:
         if not self._summary_header_written:
             with open(self._summary_path, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=self._SUMMARY_FIELDS)
