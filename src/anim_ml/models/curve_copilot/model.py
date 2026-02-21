@@ -24,6 +24,13 @@ class CurveCopilotConfig:
     conv_channels: int = 64
     bone_context_dim: int = 64
     topology_dim: int = 6
+    periodic_time_encoding: bool = False
+
+
+class PeriodicTimeEncoder(nn.Module):
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        two_pi_t = 2.0 * torch.pi * t
+        return torch.stack([t, torch.sin(two_pi_t), torch.cos(two_pi_t)], dim=-1)
 
 
 class SelfAttention(nn.Module):
@@ -88,7 +95,14 @@ class CurveCopilotModel(nn.Module):
             config = CurveCopilotConfig()
         self.config = config
 
-        self.keyframe_projection = nn.Linear(config.keyframe_dim, config.d_model)
+        self.periodic_time_encoding = config.periodic_time_encoding
+        if config.periodic_time_encoding:
+            self.time_encoder = PeriodicTimeEncoder()
+
+        kf_proj_dim = (
+            config.keyframe_dim + 2 if config.periodic_time_encoding else config.keyframe_dim
+        )
+        self.keyframe_projection = nn.Linear(kf_proj_dim, config.d_model)
         self.property_type_embedding = nn.Embedding(config.num_property_types, config.d_model)
         bone_cfg = BoneEncoderConfig(
             vocab_size=config.vocab_size,
@@ -101,7 +115,8 @@ class CurveCopilotModel(nn.Module):
         self.bone_identity_encoder = BoneIdentityEncoder(bone_cfg)
         self.bone_context_projection = nn.Linear(config.bone_context_dim, config.d_model)
         self.positional_embedding = nn.Embedding(config.max_seq + 1, config.d_model)
-        self.query_time_projection = nn.Linear(1, config.d_model)
+        query_time_input_dim = 3 if config.periodic_time_encoding else 1
+        self.query_time_projection = nn.Linear(query_time_input_dim, config.d_model)
 
         self.blocks = nn.ModuleList([
             CausalTransformerBlock(config.d_model, config.n_heads, config.d_ff, config.dropout)
@@ -130,7 +145,14 @@ class CurveCopilotModel(nn.Module):
         seq_len = context_keyframes.shape[1]
         total_len = seq_len + 1
 
-        kf_embed = self.keyframe_projection(context_keyframes)
+        if self.periodic_time_encoding:
+            kf_time = context_keyframes[:, :, 0]
+            kf_time_encoded = self.time_encoder(kf_time)
+            kf_rest = context_keyframes[:, :, 1:]
+            kf_augmented = torch.cat([kf_time_encoded, kf_rest], dim=-1)
+            kf_embed = self.keyframe_projection(kf_augmented)
+        else:
+            kf_embed = self.keyframe_projection(context_keyframes)
 
         prop_embed = self.property_type_embedding(property_type)
         bone_context = self.bone_identity_encoder(topology_features, bone_name_tokens)
@@ -141,8 +163,14 @@ class CurveCopilotModel(nn.Module):
         kf_embed = kf_embed + condition + self.positional_embedding(kf_positions).unsqueeze(0)
 
         query_position: torch.Tensor = self.query_position  # type: ignore[assignment]
+
+        if self.periodic_time_encoding:
+            query_time_input = self.time_encoder(query_time)
+        else:
+            query_time_input = query_time.unsqueeze(-1)
+
         query_token = (
-            self.query_time_projection(query_time.unsqueeze(-1))
+            self.query_time_projection(query_time_input)
             + condition.squeeze(1)
             + self.positional_embedding(query_position)
         ).unsqueeze(1)

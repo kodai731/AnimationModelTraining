@@ -5,12 +5,14 @@ import os
 import platform
 import time
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
-
-import torch
+from typing import TYPE_CHECKING, Any
 
 from anim_ml.paths import get_shared_data_dir
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import torch
 
 
 def _get_log_dir() -> Path:
@@ -20,8 +22,8 @@ def _get_log_dir() -> Path:
 def _get_process_memory_mb() -> float:
     try:
         import resource
-        rusage = resource.getrusage(resource.RUSAGE_SELF)
-        return rusage.ru_maxrss / 1024.0
+        rusage: Any = resource.getrusage(resource.RUSAGE_SELF)  # type: ignore[attr-defined]
+        return rusage.ru_maxrss / 1024.0  # type: ignore[reportUnknownVariableType]
     except ImportError:
         pass
 
@@ -47,9 +49,9 @@ def _get_shm_usage_mb() -> dict[str, float]:
     if platform.system() != "Linux":
         return {}
     try:
-        stat = os.statvfs("/dev/shm")
-        total_mb = (stat.f_blocks * stat.f_frsize) / (1024 * 1024)
-        free_mb = (stat.f_bavail * stat.f_frsize) / (1024 * 1024)
+        stat: Any = os.statvfs("/dev/shm")  # type: ignore[attr-defined]
+        total_mb = float(stat.f_blocks * stat.f_frsize) / (1024 * 1024)  # type: ignore[reportUnknownArgumentType]
+        free_mb = float(stat.f_bavail * stat.f_frsize) / (1024 * 1024)  # type: ignore[reportUnknownArgumentType]
         return {"shm_total_mb": round(total_mb, 1), "shm_used_mb": round(total_mb - free_mb, 1)}
     except OSError:
         return {}
@@ -110,11 +112,14 @@ class PreparationLog:
             f.flush()
             os.fsync(f.fileno())
 
-        print(f"[prep] {event} | rss={record['rss_mb']}MB"
-              + (f" shm_used={record.get('shm_used_mb', '?')}MB" if "shm_used_mb" in record else "")
-              + (f" mem_avail={record.get('mem_available_mb', '?')}MB" if "mem_available_mb" in record else "")
-              + (f" | {kwargs}" if kwargs else ""),
-              flush=True)
+        parts = [f"[prep] {event} | rss={record['rss_mb']}MB"]
+        if "shm_used_mb" in record:
+            parts.append(f" shm_used={record['shm_used_mb']}MB")
+        if "mem_available_mb" in record:
+            parts.append(f" mem_avail={record['mem_available_mb']}MB")
+        if kwargs:
+            parts.append(f" | {kwargs}")
+        print("".join(parts), flush=True)
 
     def log_tensor_info(self, event: str, tensors: dict[str, torch.Tensor]) -> None:
         sizes = {name: round(_tensor_size_mb(t), 2) for name, t in tensors.items()}

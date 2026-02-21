@@ -5,6 +5,7 @@ model:
   n_layers: 6
   max_seq: 8
   dropout: 0.1
+  periodic_time_encoding: true
 
 training:
   batch_size: 2048

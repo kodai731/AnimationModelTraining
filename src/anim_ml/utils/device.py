@@ -8,16 +8,16 @@ import torch
 def detect_training_device(override: str | None = None) -> torch.device:
     if override is not None:
         if override == "dml":
-            import torch_directml
-            return torch_directml.device()
+            import torch_directml  # type: ignore[import-untyped]
+            return torch_directml.device()  # type: ignore[reportReturnType]
         return torch.device(override)
 
     if torch.cuda.is_available():
         return torch.device("cuda")
 
     try:
-        import torch_directml
-        return torch_directml.device()
+        import torch_directml  # type: ignore[import-untyped]
+        return torch_directml.device()  # type: ignore[reportReturnType]
     except (ImportError, OSError):
         pass
 
