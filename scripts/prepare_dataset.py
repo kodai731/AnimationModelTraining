@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
-import sys
 from pathlib import Path
 
 import h5py
@@ -88,75 +87,59 @@ def process_single_bvh(
         return []
 
 
-def split_clips(
-    clip_samples: list[list[CurveSample]],
-) -> dict[str, list[CurveSample]]:
+def _assign_splits(n_files: int) -> dict[int, str]:
     rng = np.random.default_rng(RANDOM_SEED)
-    indices = np.arange(len(clip_samples))
+    indices = np.arange(n_files)
     rng.shuffle(indices)
 
-    n = len(clip_samples)
-    train_end = int(n * SPLIT_RATIOS["train"])
-    val_end = train_end + int(n * SPLIT_RATIOS["val"])
+    train_end = int(n_files * SPLIT_RATIOS["train"])
+    val_end = train_end + int(n_files * SPLIT_RATIOS["val"])
 
-    splits: dict[str, list[CurveSample]] = {"train": [], "val": [], "test": []}
-
+    assignment: dict[int, str] = {}
     for i in indices[:train_end]:
-        splits["train"].extend(clip_samples[i])
+        assignment[int(i)] = "train"
     for i in indices[train_end:val_end]:
-        splits["val"].extend(clip_samples[i])
+        assignment[int(i)] = "val"
     for i in indices[val_end:]:
-        splits["test"].extend(clip_samples[i])
+        assignment[int(i)] = "test"
 
-    return splits
-
-
-def save_hdf5(splits: dict[str, list[CurveSample]], output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with h5py.File(output_path, "w") as f:
-        for split_name, samples in splits.items():
-            if not samples:
-                continue
-
-            n = len(samples)
-            grp = f.create_group(split_name)
-
-            context = np.stack([s.context_keyframes for s in samples])
-            target = np.stack([s.target_keyframe for s in samples])
-            prop_type = np.array([s.property_type for s in samples], dtype=np.int32)
-            topo_features = np.stack([s.topology_features for s in samples])
-            bone_name_tokens = np.stack([s.bone_name_tokens for s in samples])
-            query_time = np.array([s.query_time for s in samples], dtype=np.float32)
-            clip_dur = np.array([s.clip_duration for s in samples], dtype=np.float32)
-            joint_depth = np.array([s.joint_depth for s in samples], dtype=np.int32)
-            curve_mean = np.array([s.curve_mean for s in samples], dtype=np.float32)
-            curve_std = np.array([s.curve_std for s in samples], dtype=np.float32)
-
-            grp.create_dataset("context_keyframes", data=context)
-            grp.create_dataset("target", data=target)
-            grp.create_dataset("property_type", data=prop_type)
-            grp.create_dataset("topology_features", data=topo_features)
-            grp.create_dataset("bone_name_tokens", data=bone_name_tokens)
-            grp.create_dataset("query_time", data=query_time)
-            grp.create_dataset("clip_duration", data=clip_dur)
-            grp.create_dataset("joint_depth", data=joint_depth)
-            grp.create_dataset("curve_mean", data=curve_mean)
-            grp.create_dataset("curve_std", data=curve_std)
-
-            logger.info("Split '%s': %d samples", split_name, n)
+    return assignment
 
 
-def _estimate_samples_memory_mb(clip_samples: list[list[CurveSample]]) -> float:
-    total_bytes = sys.getsizeof(clip_samples)
-    for clip in clip_samples:
-        total_bytes += sys.getsizeof(clip)
-        for sample in clip:
-            total_bytes += sys.getsizeof(sample)
-            for arr in (sample.context_keyframes, sample.target_keyframe,
-                        sample.topology_features, sample.bone_name_tokens):
-                total_bytes += arr.nbytes
-    return total_bytes / (1024 * 1024)
+def _samples_to_arrays(samples: list[CurveSample]) -> dict[str, np.ndarray]:
+    return {
+        "context_keyframes": np.stack([s.context_keyframes for s in samples]),
+        "target": np.stack([s.target_keyframe for s in samples]),
+        "property_type": np.array([s.property_type for s in samples], dtype=np.int32),
+        "topology_features": np.stack([s.topology_features for s in samples]),
+        "bone_name_tokens": np.stack([s.bone_name_tokens for s in samples]),
+        "query_time": np.array([s.query_time for s in samples], dtype=np.float32),
+        "clip_duration": np.array([s.clip_duration for s in samples], dtype=np.float32),
+        "joint_depth": np.array([s.joint_depth for s in samples], dtype=np.int32),
+        "curve_mean": np.array([s.curve_mean for s in samples], dtype=np.float32),
+        "curve_std": np.array([s.curve_std for s in samples], dtype=np.float32),
+    }
+
+
+def _append_to_hdf5(
+    grp: h5py.Group,
+    samples: list[CurveSample],
+    current_count: int,
+) -> int:
+    arrays = _samples_to_arrays(samples)
+    n_new = len(samples)
+
+    if current_count == 0:
+        for name, arr in arrays.items():
+            maxshape = (None,) + arr.shape[1:]
+            grp.create_dataset(name, data=arr, maxshape=maxshape, chunks=True)
+    else:
+        for name, arr in arrays.items():
+            ds = grp[name]
+            ds.resize(current_count + n_new, axis=0)
+            ds[current_count : current_count + n_new] = arr
+
+    return current_count + n_new
 
 
 def run_pipeline(
@@ -173,52 +156,49 @@ def run_pipeline(
     prep_log.log("pipeline_start", dataset=dataset, n_files=len(files))
     logger.info("Processing %d BVH files", len(files))
 
-    clip_samples: list[list[CurveSample]] = []
+    split_assignment = _assign_splits(len(files))
+    output_path = output_dir / f"{dataset}_curves.h5"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    split_counts: dict[str, int] = {"train": 0, "val": 0, "test": 0}
     total_samples = 0
+    valid_clips = 0
 
-    for i, (filepath, ds_type) in enumerate(files):
-        samples = process_single_bvh(filepath, ds_type, prep_log)
-        if samples:
-            clip_samples.append(samples)
-            total_samples += len(samples)
-            logger.info("  %s: %d samples", filepath.name, len(samples))
+    with h5py.File(output_path, "w") as f:
+        groups = {name: f.create_group(name) for name in ("train", "val", "test")}
 
-        if (i + 1) % 10 == 0:
-            gc.collect()
-            samples_mb = _estimate_samples_memory_mb(clip_samples)
-            prep_log.log(
-                "progress",
-                files_done=i + 1,
-                total_files=len(files),
-                total_clips=len(clip_samples),
-                total_samples=total_samples,
-                samples_est_mb=round(samples_mb, 1),
-            )
+        for i, (filepath, ds_type) in enumerate(files):
+            samples = process_single_bvh(filepath, ds_type, prep_log)
+
+            if samples:
+                split = split_assignment[i]
+                split_counts[split] = _append_to_hdf5(groups[split], samples, split_counts[split])
+                total_samples += len(samples)
+                valid_clips += 1
+                logger.info("  %s: %d samples -> %s", filepath.name, len(samples), split)
+
+                del samples
+                gc.collect()
+
+            if (i + 1) % 50 == 0:
+                prep_log.log(
+                    "progress",
+                    files_done=i + 1,
+                    total_files=len(files),
+                    valid_clips=valid_clips,
+                    total_samples=total_samples,
+                    split_counts=split_counts,
+                )
 
     prep_log.log(
-        "all_bvh_done",
-        total_clips=len(clip_samples),
+        "pipeline_done",
+        valid_clips=valid_clips,
         total_samples=total_samples,
-        samples_est_mb=round(_estimate_samples_memory_mb(clip_samples), 1),
+        split_counts=split_counts,
+        output=str(output_path),
     )
-    logger.info("Total clips: %d, Total samples: %d", len(clip_samples), total_samples)
-
-    if not clip_samples:
-        logger.warning("No samples generated. Check raw data directory.")
-        return
-
-    prep_log.log("split_clips_start")
-    splits = split_clips(clip_samples)
-    del clip_samples
-    gc.collect()
-    prep_log.log("split_clips_done", splits={k: len(v) for k, v in splits.items()})
-
-    output_path = output_dir / f"{dataset}_curves.h5"
-    prep_log.log("save_hdf5_start", output=str(output_path))
-    save_hdf5(splits, output_path)
-    del splits
-    gc.collect()
-    prep_log.log("save_hdf5_done", output=str(output_path))
+    logger.info("Total clips: %d, Total samples: %d", valid_clips, total_samples)
+    logger.info("Splits: %s", split_counts)
     logger.info("Saved to %s", output_path)
 
 

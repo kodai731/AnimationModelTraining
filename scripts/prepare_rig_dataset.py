@@ -3,22 +3,24 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
-import sys
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 from anim_ml.data.bvh_parser import parse_bvh
 from anim_ml.data.dataset_100style import find_100style_bvh_files
 from anim_ml.data.dataset_cmu import find_cmu_bvh_files
 from anim_ml.data.rig_data_generator import (
+    append_rig_samples_to_hdf5,
     generate_rig_samples_from_motion,
-    save_rig_samples_hdf5,
 )
 from anim_ml.utils.preparation_log import PreparationLog
 
 logger = logging.getLogger(__name__)
 
+SPLIT_RATIOS = {"train": 0.8, "val": 0.1, "test": 0.1}
+RANDOM_SEED = 42
 Z_UP_DATASETS = {"cmu"}
 
 
@@ -89,15 +91,23 @@ def process_single_bvh(
         return []
 
 
-def _estimate_samples_memory_mb(all_samples: list) -> float:
-    total_bytes = sys.getsizeof(all_samples)
-    for sample in all_samples:
-        total_bytes += sys.getsizeof(sample)
-        if hasattr(sample, "__dict__"):
-            for val in sample.__dict__.values():
-                if hasattr(val, "nbytes"):
-                    total_bytes += val.nbytes
-    return total_bytes / (1024 * 1024)
+def _assign_splits(n_files: int) -> dict[int, str]:
+    rng = np.random.default_rng(RANDOM_SEED)
+    indices = np.arange(n_files)
+    rng.shuffle(indices)
+
+    train_end = int(n_files * SPLIT_RATIOS["train"])
+    val_end = train_end + int(n_files * SPLIT_RATIOS["val"])
+
+    assignment: dict[int, str] = {}
+    for i in indices[:train_end]:
+        assignment[int(i)] = "train"
+    for i in indices[train_end:val_end]:
+        assignment[int(i)] = "val"
+    for i in indices[val_end:]:
+        assignment[int(i)] = "test"
+
+    return assignment
 
 
 def run_pipeline(
@@ -115,42 +125,51 @@ def run_pipeline(
     logger.info("Processing %d BVH files", len(files))
 
     rng = np.random.default_rng(42)
-    all_samples: list = []
+    split_assignment = _assign_splits(len(files))
+    output_path = output_dir / f"{dataset}_rig.h5"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    for i, (filepath, ds_type) in enumerate(files):
-        samples = process_single_bvh(filepath, ds_type, rng, prep_log)
-        if samples:
-            all_samples.extend(samples)
-            logger.info("  %s: %d samples", filepath.name, len(samples))
+    split_counts: dict[str, int] = {"train": 0, "val": 0, "test": 0}
+    total_samples = 0
+    valid_files = 0
 
-        if (i + 1) % 10 == 0:
-            gc.collect()
-            samples_mb = _estimate_samples_memory_mb(all_samples)
-            prep_log.log(
-                "progress",
-                files_done=i + 1,
-                total_files=len(files),
-                total_samples=len(all_samples),
-                samples_est_mb=round(samples_mb, 1),
-            )
+    with h5py.File(output_path, "w") as f:  # type: ignore[no-untyped-call]
+        groups = {name: f.create_group(name) for name in ("train", "val", "test")}  # type: ignore[no-untyped-call]
+
+        for i, (filepath, ds_type) in enumerate(files):
+            samples = process_single_bvh(filepath, ds_type, rng, prep_log)
+
+            if samples:
+                split = split_assignment[i]
+                split_counts[split] = append_rig_samples_to_hdf5(
+                    groups[split], samples, split_counts[split],
+                )
+                total_samples += len(samples)
+                valid_files += 1
+                logger.info("  %s: %d samples -> %s", filepath.name, len(samples), split)
+
+                del samples
+                gc.collect()
+
+            if (i + 1) % 50 == 0:
+                prep_log.log(
+                    "progress",
+                    files_done=i + 1,
+                    total_files=len(files),
+                    valid_files=valid_files,
+                    total_samples=total_samples,
+                    split_counts=split_counts,
+                )
 
     prep_log.log(
-        "all_bvh_done",
-        total_samples=len(all_samples),
-        samples_est_mb=round(_estimate_samples_memory_mb(all_samples), 1),
+        "pipeline_done",
+        valid_files=valid_files,
+        total_samples=total_samples,
+        split_counts=split_counts,
+        output=str(output_path),
     )
-    logger.info("Total samples: %d", len(all_samples))
-
-    if not all_samples:
-        logger.warning("No samples generated. Check raw data directory.")
-        return
-
-    output_path = output_dir / f"{dataset}_rig.h5"
-    prep_log.log("save_hdf5_start", output=str(output_path))
-    save_rig_samples_hdf5(all_samples, output_path)
-    del all_samples
-    gc.collect()
-    prep_log.log("save_hdf5_done", output=str(output_path))
+    logger.info("Total files: %d, Total samples: %d", valid_files, total_samples)
+    logger.info("Splits: %s", split_counts)
     logger.info("Saved to %s", output_path)
 
 

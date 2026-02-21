@@ -313,6 +313,50 @@ def _pad_to_max(array: np.ndarray, max_size: int, axis: int = 0) -> np.ndarray:
     return np.pad(array, pad_widths, mode="constant", constant_values=0)
 
 
+def _rig_samples_to_arrays(samples: list[RigSample]) -> dict[str, np.ndarray]:
+    stacked_features = np.stack([_pad_to_max(s.joint_features, MAX_JOINTS) for s in samples])
+    stacked_deltas = np.stack([_pad_to_max(s.target_deltas, MAX_JOINTS) for s in samples])
+    stacked_conf = np.stack([_pad_to_max(s.confidence_targets, MAX_JOINTS) for s in samples])
+    stacked_topo = np.stack([_pad_to_max(s.topology_features, MAX_JOINTS) for s in samples])
+    stacked_tokens = np.stack([_pad_to_max(s.bone_name_tokens, MAX_JOINTS) for s in samples])
+    joint_masks = np.stack([_build_joint_mask(len(s.parent_indices)) for s in samples])
+    edge_data = np.stack([_build_padded_edge_data(s.parent_indices) for s in samples])
+
+    return {
+        "joint_features": stacked_features,
+        "target_deltas": stacked_deltas,
+        "confidence_targets": stacked_conf,
+        "topology_features": stacked_topo,
+        "bone_name_tokens": stacked_tokens,
+        "joint_mask": joint_masks,
+        "source_indices": edge_data[:, 0, :],
+        "target_indices": edge_data[:, 1, :],
+        "edge_direction": edge_data[:, 2, :],
+        "edge_mask": edge_data[:, 3, :],
+    }
+
+
+def append_rig_samples_to_hdf5(
+    grp: h5py.Group,  # type: ignore[type-arg]
+    samples: list[RigSample],
+    current_count: int,
+) -> int:
+    arrays = _rig_samples_to_arrays(samples)
+    n_new = len(samples)
+
+    if current_count == 0:
+        for name, arr in arrays.items():
+            maxshape = (None,) + arr.shape[1:]
+            grp.create_dataset(name, data=arr, maxshape=maxshape, chunks=True)  # type: ignore[no-untyped-call]
+    else:
+        for name, arr in arrays.items():
+            ds = grp[name]
+            ds.resize(current_count + n_new, axis=0)
+            ds[current_count : current_count + n_new] = arr
+
+    return current_count + n_new
+
+
 def save_rig_samples_hdf5(
     samples: list[RigSample],
     output_path: Path,

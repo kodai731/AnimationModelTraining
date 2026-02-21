@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 import os
 from typing import TYPE_CHECKING
 
@@ -17,14 +16,6 @@ if TYPE_CHECKING:
     from anim_ml.utils.preparation_log import PreparationLog
 
 
-def _load_tensor(
-    grp: h5py.Group,  # type: ignore[type-arg]
-    key: str,
-    dtype: type[np.floating] | type[np.integer],  # type: ignore[type-arg]
-) -> torch.Tensor:
-    return torch.from_numpy(np.array(grp[key], dtype=dtype))  # type: ignore[no-any-return, reportUnknownMemberType]
-
-
 class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
     def __init__(
         self,
@@ -33,167 +24,81 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         use_shared_memory: bool = True,
         prep_log: PreparationLog | None = None,
     ) -> None:
+        self._split = split
+        self._paths: list[str] = []
+        self._offsets: list[int] = []
+        self._handles: list[h5py.File | None] = []
+
         if prep_log:
-            prep_log.log("rig_dataset_init_start", split=split,
-                         num_files=len(hdf5_paths), use_shared_memory=use_shared_memory)
+            prep_log.log("rig_dataset_init_start", split=split, num_files=len(hdf5_paths))
 
-        features_chunks: list[torch.Tensor] = []
-        topo_chunks: list[torch.Tensor] = []
-        tokens_chunks: list[torch.Tensor] = []
-        mask_chunks: list[torch.Tensor] = []
-        deltas_chunks: list[torch.Tensor] = []
-        confidence_chunks: list[torch.Tensor] = []
-        src_chunks: list[torch.Tensor] = []
-        tgt_chunks: list[torch.Tensor] = []
-        edge_dir_chunks: list[torch.Tensor] = []
-        edge_mask_chunks: list[torch.Tensor] = []
-
+        offset = 0
         for i, path in enumerate(hdf5_paths):
-            if prep_log:
-                prep_log.log("rig_hdf5_load_start", file_index=i, path=str(path))
-
             with h5py.File(path, "r") as f:
-                if split not in f:
+                if split not in f or "joint_features" not in f[split]:
                     if prep_log:
                         prep_log.log("rig_hdf5_split_missing", file_index=i)
                     continue
+                n = len(f[split]["joint_features"])
 
-                grp: h5py.Group = f[split]  # type: ignore[assignment]
-                features_chunks.append(
-                    _load_tensor(grp, "joint_features", np.float32),
-                )
-                topo_chunks.append(
-                    _load_tensor(grp, "topology_features", np.float32),
-                )
-                tokens_chunks.append(
-                    _load_tensor(grp, "bone_name_tokens", np.int64),
-                )
-                mask_chunks.append(
-                    _load_tensor(grp, "joint_mask", np.float32),
-                )
-                deltas_chunks.append(
-                    _load_tensor(grp, "target_deltas", np.float32),
-                )
-                confidence_chunks.append(
-                    _load_tensor(grp, "confidence_targets", np.float32),
-                )
-                src_chunks.append(
-                    _load_tensor(grp, "source_indices", np.int64),
-                )
-                tgt_chunks.append(
-                    _load_tensor(grp, "target_indices", np.int64),
-                )
-                edge_dir_chunks.append(
-                    _load_tensor(grp, "edge_direction", np.int64),
-                )
-                edge_mask_chunks.append(
-                    _load_tensor(grp, "edge_mask", np.float32),
-                )
+            self._paths.append(str(path))
+            self._offsets.append(offset)
+            self._handles.append(None)
+            offset += n
 
             if prep_log:
-                prep_log.log("rig_hdf5_load_done", file_index=i,
-                             samples=len(features_chunks[-1]))
+                prep_log.log("rig_hdf5_indexed", file_index=i, samples=n)
 
-        if features_chunks:
-            if prep_log:
-                prep_log.log("rig_torch_cat_start", num_chunks=len(features_chunks))
-
-            self._joint_features = torch.cat(features_chunks)
-            self._topology_features = torch.cat(topo_chunks)
-            self._bone_name_tokens = torch.cat(tokens_chunks)
-            self._joint_mask = torch.cat(mask_chunks)
-            self._target_deltas = torch.cat(deltas_chunks)
-            self._confidence_targets = torch.cat(confidence_chunks)
-            self._source_indices = torch.cat(src_chunks)
-            self._target_indices = torch.cat(tgt_chunks)
-            self._edge_direction = torch.cat(edge_dir_chunks)
-            self._edge_mask = torch.cat(edge_mask_chunks)
-
-            if prep_log:
-                prep_log.log_tensor_info("rig_torch_cat_done", {
-                    "joint_features": self._joint_features,
-                    "topology_features": self._topology_features,
-                    "bone_name_tokens": self._bone_name_tokens,
-                    "joint_mask": self._joint_mask,
-                    "target_deltas": self._target_deltas,
-                    "confidence_targets": self._confidence_targets,
-                    "source_indices": self._source_indices,
-                    "target_indices": self._target_indices,
-                })
-
-            del features_chunks, topo_chunks, tokens_chunks, mask_chunks
-            del deltas_chunks, confidence_chunks
-            del src_chunks, tgt_chunks, edge_dir_chunks, edge_mask_chunks
-            gc.collect()
-
-            if prep_log:
-                prep_log.log("rig_chunks_freed")
-
-            if use_shared_memory:
-                if prep_log:
-                    prep_log.log("rig_share_memory_start")
-                self._move_to_shared_memory()
-                if prep_log:
-                    prep_log.log("rig_share_memory_done")
-        else:
-            self._joint_features = torch.empty(0)
-            self._topology_features = torch.empty(0)
-            self._bone_name_tokens = torch.empty(0, dtype=torch.int64)
-            self._joint_mask = torch.empty(0)
-            self._target_deltas = torch.empty(0)
-            self._confidence_targets = torch.empty(0)
-            self._source_indices = torch.empty(0, dtype=torch.int64)
-            self._target_indices = torch.empty(0, dtype=torch.int64)
-            self._edge_direction = torch.empty(0, dtype=torch.int64)
-            self._edge_mask = torch.empty(0)
+        self._total = offset
 
         if prep_log:
-            prep_log.log("rig_dataset_init_done", split=split,
-                         total_samples=len(self._joint_features))
+            prep_log.log("rig_dataset_init_done", split=split, total_samples=self._total)
 
-    def _move_to_shared_memory(self) -> None:
-        if len(self._joint_features) == 0:
-            return
-        self._joint_features.share_memory_()
-        self._topology_features.share_memory_()
-        self._bone_name_tokens.share_memory_()
-        self._joint_mask.share_memory_()
-        self._target_deltas.share_memory_()
-        self._confidence_targets.share_memory_()
-        self._source_indices.share_memory_()
-        self._target_indices.share_memory_()
-        self._edge_direction.share_memory_()
-        self._edge_mask.share_memory_()
+    def _ensure_open(self, file_idx: int) -> h5py.File:
+        handle = self._handles[file_idx]
+        if handle is None:
+            handle = h5py.File(self._paths[file_idx], "r")
+            self._handles[file_idx] = handle
+        return handle
+
+    def _locate(self, index: int) -> tuple[int, int]:
+        lo, hi = 0, len(self._offsets) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._offsets[mid] <= index:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo, index - self._offsets[lo]
 
     def __len__(self) -> int:
-        return len(self._joint_features)
+        return self._total
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        if index < 0 or index >= len(self._joint_features):
-            msg = f"Index {index} out of range [0, {len(self._joint_features)})"
+        if index < 0 or index >= self._total:
+            msg = f"Index {index} out of range [0, {self._total})"
             raise IndexError(msg)
 
+        file_idx, local_idx = self._locate(index)
+        f = self._ensure_open(file_idx)
+        grp = f[self._split]
+
         return {
-            "joint_features": self._joint_features[index],
-            "topology_features": self._topology_features[index],
-            "bone_name_tokens": self._bone_name_tokens[index],
-            "joint_mask": self._joint_mask[index],
-            "target_deltas": self._target_deltas[index],
-            "confidence_targets": self._confidence_targets[index],
-            "source_indices": self._source_indices[index],
-            "target_indices": self._target_indices[index],
-            "edge_direction": self._edge_direction[index],
-            "edge_mask": self._edge_mask[index],
+            "joint_features": torch.from_numpy(np.array(grp["joint_features"][local_idx], dtype=np.float32)),
+            "topology_features": torch.from_numpy(np.array(grp["topology_features"][local_idx], dtype=np.float32)),
+            "bone_name_tokens": torch.from_numpy(np.array(grp["bone_name_tokens"][local_idx], dtype=np.int64)),
+            "joint_mask": torch.from_numpy(np.array(grp["joint_mask"][local_idx], dtype=np.float32)),
+            "target_deltas": torch.from_numpy(np.array(grp["target_deltas"][local_idx], dtype=np.float32)),
+            "confidence_targets": torch.from_numpy(np.array(grp["confidence_targets"][local_idx], dtype=np.float32)),
+            "source_indices": torch.from_numpy(np.array(grp["source_indices"][local_idx], dtype=np.int64)),
+            "target_indices": torch.from_numpy(np.array(grp["target_indices"][local_idx], dtype=np.int64)),
+            "edge_direction": torch.from_numpy(np.array(grp["edge_direction"][local_idx], dtype=np.int64)),
+            "edge_mask": torch.from_numpy(np.array(grp["edge_mask"][local_idx], dtype=np.float32)),
         }
 
     def close(self) -> None:
-        self._joint_features = torch.empty(0)
-        self._topology_features = torch.empty(0)
-        self._bone_name_tokens = torch.empty(0, dtype=torch.int64)
-        self._joint_mask = torch.empty(0)
-        self._target_deltas = torch.empty(0)
-        self._confidence_targets = torch.empty(0)
-        self._source_indices = torch.empty(0, dtype=torch.int64)
-        self._target_indices = torch.empty(0, dtype=torch.int64)
-        self._edge_direction = torch.empty(0, dtype=torch.int64)
-        self._edge_mask = torch.empty(0)
+        for i, handle in enumerate(self._handles):
+            if handle is not None:
+                handle.close()
+                self._handles[i] = None
+        self._total = 0

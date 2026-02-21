@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 import os
 from typing import TYPE_CHECKING
 
@@ -30,132 +29,83 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
     ) -> None:
         self._split = split
         self._unk_rate = unk_rate
+        self._paths: list[str] = []
+        self._offsets: list[int] = []
+        self._handles: list[h5py.File | None] = []
 
         if prep_log:
-            prep_log.log("curve_dataset_init_start", split=split,
-                         num_files=len(hdf5_paths), use_shared_memory=use_shared_memory)
+            prep_log.log("curve_dataset_init_start", split=split, num_files=len(hdf5_paths))
 
-        context_chunks: list[torch.Tensor] = []
-        target_chunks: list[torch.Tensor] = []
-        prop_type_chunks: list[torch.Tensor] = []
-        topo_chunks: list[torch.Tensor] = []
-        name_token_chunks: list[torch.Tensor] = []
-        query_time_chunks: list[torch.Tensor] = []
-
+        offset = 0
         for i, path in enumerate(hdf5_paths):
-            if prep_log:
-                prep_log.log("curve_hdf5_load_start", file_index=i, path=str(path))
-
             with h5py.File(path, "r") as f:
-                if split not in f:
+                if split not in f or "context_keyframes" not in f[split]:
                     if prep_log:
                         prep_log.log("curve_hdf5_split_missing", file_index=i)
                     continue
-                grp = f[split]
-                context_chunks.append(
-                    torch.from_numpy(np.array(grp["context_keyframes"], dtype=np.float32)),
-                )
-                target_chunks.append(
-                    torch.from_numpy(np.array(grp["target"], dtype=np.float32)),
-                )
-                prop_type_chunks.append(
-                    torch.from_numpy(np.array(grp["property_type"], dtype=np.int64)),
-                )
-                topo_chunks.append(
-                    torch.from_numpy(np.array(grp["topology_features"], dtype=np.float32)),
-                )
-                name_token_chunks.append(
-                    torch.from_numpy(np.array(grp["bone_name_tokens"], dtype=np.int64)),
-                )
-                query_time_chunks.append(
-                    torch.from_numpy(np.array(grp["query_time"], dtype=np.float32)),
-                )
+                n = len(f[split]["context_keyframes"])
+
+            self._paths.append(str(path))
+            self._offsets.append(offset)
+            self._handles.append(None)
+            offset += n
 
             if prep_log:
-                prep_log.log("curve_hdf5_load_done", file_index=i,
-                             samples=len(context_chunks[-1]))
+                prep_log.log("curve_hdf5_indexed", file_index=i, samples=n)
 
-        if context_chunks:
-            if prep_log:
-                prep_log.log("curve_torch_cat_start", num_chunks=len(context_chunks))
-
-            self._context = torch.cat(context_chunks)
-            self._target = torch.cat(target_chunks)
-            self._prop_type = torch.cat(prop_type_chunks)
-            self._topo = torch.cat(topo_chunks)
-            self._name_tokens = torch.cat(name_token_chunks)
-            self._query_time = torch.cat(query_time_chunks)
-
-            if prep_log:
-                prep_log.log_tensor_info("curve_torch_cat_done", {
-                    "context": self._context, "target": self._target,
-                    "prop_type": self._prop_type, "topo": self._topo,
-                    "name_tokens": self._name_tokens, "query_time": self._query_time,
-                })
-
-            del context_chunks, target_chunks, prop_type_chunks
-            del topo_chunks, name_token_chunks, query_time_chunks
-            gc.collect()
-
-            if prep_log:
-                prep_log.log("curve_chunks_freed")
-
-            if use_shared_memory:
-                if prep_log:
-                    prep_log.log("curve_share_memory_start")
-                self._move_to_shared_memory()
-                if prep_log:
-                    prep_log.log("curve_share_memory_done")
-        else:
-            self._context = torch.empty(0)
-            self._target = torch.empty(0)
-            self._prop_type = torch.empty(0, dtype=torch.int64)
-            self._topo = torch.empty(0)
-            self._name_tokens = torch.empty(0, dtype=torch.int64)
-            self._query_time = torch.empty(0)
+        self._total = offset
 
         if prep_log:
-            prep_log.log("curve_dataset_init_done", split=split,
-                         total_samples=len(self._context))
+            prep_log.log("curve_dataset_init_done", split=split, total_samples=self._total)
 
-    def _move_to_shared_memory(self) -> None:
-        if len(self._context) == 0:
-            return
-        self._context.share_memory_()
-        self._target.share_memory_()
-        self._prop_type.share_memory_()
-        self._topo.share_memory_()
-        self._name_tokens.share_memory_()
-        self._query_time.share_memory_()
+    def _ensure_open(self, file_idx: int) -> h5py.File:
+        handle = self._handles[file_idx]
+        if handle is None:
+            handle = h5py.File(self._paths[file_idx], "r")
+            self._handles[file_idx] = handle
+        return handle
+
+    def _locate(self, index: int) -> tuple[int, int]:
+        lo, hi = 0, len(self._offsets) - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._offsets[mid] <= index:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo, index - self._offsets[lo]
 
     def __len__(self) -> int:
-        return len(self._context)
+        return self._total
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        if index < 0 or index >= len(self._context):
-            msg = f"Index {index} out of range [0, {len(self._context)})"
+        if index < 0 or index >= self._total:
+            msg = f"Index {index} out of range [0, {self._total})"
             raise IndexError(msg)
 
-        tokens = self._name_tokens[index].clone()
+        file_idx, local_idx = self._locate(index)
+        f = self._ensure_open(file_idx)
+        grp = f[self._split]
+
+        tokens = torch.from_numpy(np.array(grp["bone_name_tokens"][local_idx], dtype=np.int64))
         if self._split == "train" and self._unk_rate > 0:
             tokens = _augment_bone_name_tokens(tokens, self._unk_rate)
 
         return {
-            "context_keyframes": self._context[index],
-            "target": self._target[index],
-            "property_type": self._prop_type[index],
-            "topology_features": self._topo[index],
+            "context_keyframes": torch.from_numpy(np.array(grp["context_keyframes"][local_idx], dtype=np.float32)),
+            "target": torch.from_numpy(np.array(grp["target"][local_idx], dtype=np.float32)),
+            "property_type": torch.tensor(int(grp["property_type"][local_idx]), dtype=torch.int64),
+            "topology_features": torch.from_numpy(np.array(grp["topology_features"][local_idx], dtype=np.float32)),
             "bone_name_tokens": tokens,
-            "query_time": self._query_time[index].unsqueeze(0),
+            "query_time": torch.tensor([float(grp["query_time"][local_idx])], dtype=torch.float32),
         }
 
     def close(self) -> None:
-        self._context = torch.empty(0)
-        self._target = torch.empty(0)
-        self._prop_type = torch.empty(0, dtype=torch.int64)
-        self._topo = torch.empty(0)
-        self._name_tokens = torch.empty(0, dtype=torch.int64)
-        self._query_time = torch.empty(0)
+        for i, handle in enumerate(self._handles):
+            if handle is not None:
+                handle.close()
+                self._handles[i] = None
+        self._total = 0
 
 
 def _augment_bone_name_tokens(tokens: torch.Tensor, unk_rate: float) -> torch.Tensor:
