@@ -112,7 +112,7 @@ def _samples_to_arrays(samples: list[CurveSample]) -> dict[str, np.ndarray]:
         "target": np.stack([s.target_keyframe for s in samples]),
         "property_type": np.array([s.property_type for s in samples], dtype=np.int32),
         "topology_features": np.stack([s.topology_features for s in samples]),
-        "bone_name_tokens": np.stack([s.bone_name_tokens for s in samples]),
+        "bone_name_tokens": np.stack([s.bone_name_tokens for s in samples]).astype(np.int32),
         "query_time": np.array([s.query_time for s in samples], dtype=np.float32),
         "clip_duration": np.array([s.clip_duration for s in samples], dtype=np.float32),
         "joint_depth": np.array([s.joint_depth for s in samples], dtype=np.int32),
@@ -132,7 +132,10 @@ def _append_to_hdf5(
     if current_count == 0:
         for name, arr in arrays.items():
             maxshape = (None,) + arr.shape[1:]
-            grp.create_dataset(name, data=arr, maxshape=maxshape, chunks=True)
+            grp.create_dataset(
+                name, data=arr, maxshape=maxshape, chunks=True,
+                compression="gzip", compression_opts=4,
+            )
     else:
         for name, arr in arrays.items():
             ds = grp[name]

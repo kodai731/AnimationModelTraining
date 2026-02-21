@@ -421,16 +421,17 @@ def _write_split_to_hdf5(
         _build_padded_edge_data(s.parent_indices) for s in split_samples
     ])
 
-    grp.create_dataset("joint_features", data=stacked_features)  # type: ignore[no-untyped-call]
-    grp.create_dataset("target_deltas", data=stacked_deltas)  # type: ignore[no-untyped-call]
-    grp.create_dataset("confidence_targets", data=stacked_conf)  # type: ignore[no-untyped-call]
-    grp.create_dataset("topology_features", data=stacked_topo)  # type: ignore[no-untyped-call]
-    grp.create_dataset("bone_name_tokens", data=stacked_tokens)  # type: ignore[no-untyped-call]
-    grp.create_dataset("joint_mask", data=joint_masks)  # type: ignore[no-untyped-call]
-    grp.create_dataset("source_indices", data=edge_data[:, 0, :])  # type: ignore[no-untyped-call]
-    grp.create_dataset("target_indices", data=edge_data[:, 1, :])  # type: ignore[no-untyped-call]
-    grp.create_dataset("edge_direction", data=edge_data[:, 2, :])  # type: ignore[no-untyped-call]
-    grp.create_dataset("edge_mask", data=edge_data[:, 3, :])  # type: ignore[no-untyped-call]
+    compress = dict(compression="gzip", compression_opts=4)
+    grp.create_dataset("joint_features", data=stacked_features, **compress)  # type: ignore[no-untyped-call]
+    grp.create_dataset("target_deltas", data=stacked_deltas, **compress)  # type: ignore[no-untyped-call]
+    grp.create_dataset("confidence_targets", data=stacked_conf, **compress)  # type: ignore[no-untyped-call]
+    grp.create_dataset("topology_features", data=stacked_topo, **compress)  # type: ignore[no-untyped-call]
+    grp.create_dataset("bone_name_tokens", data=stacked_tokens.astype(np.int32), **compress)  # type: ignore[no-untyped-call]
+    grp.create_dataset("joint_mask", data=joint_masks, **compress)  # type: ignore[no-untyped-call]
+    grp.create_dataset("source_indices", data=edge_data[:, 0, :], **compress)  # type: ignore[no-untyped-call]
+    grp.create_dataset("target_indices", data=edge_data[:, 1, :], **compress)  # type: ignore[no-untyped-call]
+    grp.create_dataset("edge_direction", data=edge_data[:, 2, :], **compress)  # type: ignore[no-untyped-call]
+    grp.create_dataset("edge_mask", data=edge_data[:, 3, :], **compress)  # type: ignore[no-untyped-call]
 
 
 def _build_joint_mask(num_joints: int) -> np.ndarray:
