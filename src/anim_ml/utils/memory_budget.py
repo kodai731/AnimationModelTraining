@@ -58,3 +58,37 @@ def resolve_cache_budget_bytes() -> int:
     available = get_available_memory_mb()
     capped = min(configured, int(available * 0.75))
     return max(capped, 0) * 1024 * 1024
+
+
+class MemoryBudget:
+    def __init__(self, total_bytes: int) -> None:
+        self._total_bytes = total_bytes
+        self._allocations: dict[str, int] = {}
+
+    @property
+    def total_bytes(self) -> int:
+        return self._total_bytes
+
+    @property
+    def available_bytes(self) -> int:
+        return max(self._total_bytes - sum(self._allocations.values()), 0)
+
+    def request(self, name: str, desired_bytes: int) -> int:
+        granted = min(desired_bytes, self.available_bytes)
+        if granted > 0:
+            self._allocations[name] = granted
+        return granted
+
+    def release(self, name: str) -> None:
+        self._allocations.pop(name, None)
+
+
+_OVERHEAD_MB = 1500
+
+
+def create_memory_budget() -> MemoryBudget:
+    available = get_available_memory_mb()
+    configured = get_configured_budget_mb()
+    data_budget = max(available - _OVERHEAD_MB, 0)
+    capped = min(configured, data_budget)
+    return MemoryBudget(total_bytes=max(capped, 0) * 1024 * 1024)

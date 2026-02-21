@@ -17,7 +17,7 @@ from anim_ml.data.curve_dataset import CurveCopilotDataset
 from anim_ml.models.curve_copilot.model import CurveCopilotConfig, CurveCopilotModel
 from anim_ml.paths import resolve_data_path
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
-from anim_ml.utils.memory_budget import resolve_cache_budget_bytes
+from anim_ml.utils.memory_budget import create_memory_budget
 from anim_ml.utils.optimizer import DmlAdamW
 from anim_ml.utils.preparation_log import PreparationLog
 from anim_ml.utils.timing_log import BatchTimingLog, TimingLog
@@ -334,16 +334,19 @@ def train(
     prep_log.log("model_created", params=sum(p.numel() for p in model.parameters()))
 
     train_paths = [resolve_data_path(p) for p in config.data.train_files]
-    cache_budget = resolve_cache_budget_bytes()
+    budget = create_memory_budget()
 
-    train_dataset = CurveCopilotDataset(
-        train_paths, split="train", cache_budget_bytes=cache_budget,
-        prep_log=prep_log,
-    )
     val_dataset = CurveCopilotDataset(
-        train_paths, split=config.data.val_split, cache_budget_bytes=cache_budget,
-        prep_log=prep_log,
+        train_paths, split=config.data.val_split, prep_log=prep_log,
+        memory_budget=budget, budget_name="val",
     )
+    train_dataset = CurveCopilotDataset(
+        train_paths, split="train", prep_log=prep_log,
+        memory_budget=budget, budget_name="train",
+    )
+
+    val_dataset.evict_cache()
+    train_dataset.reload_cache()
     gc.collect()
 
     train_status = "fully loaded" if train_dataset.is_fully_loaded else "chunked"
@@ -416,8 +419,14 @@ def train(
                     config, device, epoch, batch_timing,
                 )
 
+            train_dataset.evict_cache()
+            val_dataset.reload_cache()
+
             with TimingLog.measure() as val_time:
                 val_metrics = validate(model, val_loader, config, device)
+
+            val_dataset.evict_cache()
+            train_dataset.reload_cache()
 
             all_metrics = {**train_metrics, **val_metrics}
             print(f"  train_loss={train_metrics['loss/train']:.4f}"

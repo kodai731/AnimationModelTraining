@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from anim_ml.utils.memory_budget import MemoryBudget
     from anim_ml.utils.preparation_log import PreparationLog
 
 _FIELD_DTYPES: dict[str, torch.dtype] = {
@@ -41,11 +42,15 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         split: str = "train",
         cache_budget_bytes: int = 0,
         prep_log: PreparationLog | None = None,
+        memory_budget: MemoryBudget | None = None,
+        budget_name: str = "",
     ) -> None:
         self._split = split
         self._paths: list[str] = []
         self._offsets: list[int] = []
         self._file_counts: list[int] = []
+        self._memory_budget = memory_budget
+        self._budget_name = budget_name
 
         if prep_log:
             prep_log.log("rig_dataset_init_start", split=split, num_files=len(hdf5_paths))
@@ -76,16 +81,9 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         self._total_count = offset
         self._per_sample_bytes = per_sample_bytes
 
-        chunk_size = self._total_count
-        if cache_budget_bytes > 0 and per_sample_bytes > 0 and self._total_count > 0:
-            budget_samples = cache_budget_bytes // per_sample_bytes
-            chunk_size = max(min(budget_samples, self._total_count), 1)
+        effective_budget = self._resolve_effective_budget(cache_budget_bytes)
+        self._apply_chunk_size(effective_budget)
 
-        self._chunk_size = chunk_size
-        if self._chunk_size > 0:
-            self._num_chunks = math.ceil(self._total_count / self._chunk_size)
-        else:
-            self._num_chunks = 1
         self._chunk_index = 0
         self._cache: dict[str, torch.Tensor] = {}
         self._loaded_count = 0
@@ -109,6 +107,24 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
     def total_count(self) -> int:
         return self._total_count
 
+    def _resolve_effective_budget(self, cache_budget_bytes: int) -> int:
+        if self._memory_budget is not None and self._budget_name:
+            total_needed = self._per_sample_bytes * self._total_count
+            return self._memory_budget.request(self._budget_name, total_needed)
+        return cache_budget_bytes
+
+    def _apply_chunk_size(self, effective_budget: int) -> None:
+        chunk_size = self._total_count
+        if effective_budget > 0 and self._per_sample_bytes > 0 and self._total_count > 0:
+            budget_samples = effective_budget // self._per_sample_bytes
+            chunk_size = max(min(budget_samples, self._total_count), 1)
+
+        self._chunk_size = chunk_size
+        if self._chunk_size > 0:
+            self._num_chunks = math.ceil(self._total_count / self._chunk_size)
+        else:
+            self._num_chunks = 1
+
     def _load_current_chunk(self) -> None:
         if self._total_count == 0 or self._chunk_size == 0:
             self._loaded_count = 0
@@ -117,7 +133,26 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         chunk_start = self._chunk_index * self._chunk_size
         chunk_count = min(self._chunk_size, self._total_count - chunk_start)
 
-        buffers: dict[str, list[torch.Tensor]] = {key: [] for key in _FIELD_DTYPES}
+        self._cache.clear()
+
+        file_slices = self._collect_file_slices(chunk_start, chunk_count)
+
+        for key, dtype in _FIELD_DTYPES.items():
+            parts: list[torch.Tensor] = []
+            for file_idx, local_start, local_end in file_slices:
+                with h5py.File(self._paths[file_idx], "r") as f:
+                    parts.append(
+                        torch.as_tensor(f[self._split][key][local_start:local_end], dtype=dtype),
+                    )
+            self._cache[key] = torch.cat(parts)
+            del parts
+
+        self._loaded_count = chunk_count
+
+    def _collect_file_slices(
+        self, chunk_start: int, chunk_count: int,
+    ) -> list[tuple[int, int, int]]:
+        slices: list[tuple[int, int, int]] = []
         remaining = chunk_count
         pos = chunk_start
 
@@ -125,18 +160,25 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
             file_idx, local_idx = self._locate(pos)
             available = self._file_counts[file_idx] - local_idx
             to_read = min(available, remaining)
-            end = local_idx + to_read
-
-            with h5py.File(self._paths[file_idx], "r") as f:
-                grp = f[self._split]
-                for key, dtype in _FIELD_DTYPES.items():
-                    buffers[key].append(torch.as_tensor(grp[key][local_idx:end], dtype=dtype))
-
+            slices.append((file_idx, local_idx, local_idx + to_read))
             remaining -= to_read
             pos += to_read
 
-        self._cache = {key: torch.cat(parts) for key, parts in buffers.items()}
-        self._loaded_count = chunk_count
+        return slices
+
+    def evict_cache(self) -> None:
+        self._cache.clear()
+        self._loaded_count = 0
+        if self._memory_budget and self._budget_name:
+            self._memory_budget.release(self._budget_name)
+
+    def reload_cache(self) -> None:
+        if self._memory_budget and self._budget_name and self._per_sample_bytes > 0:
+            total_needed = self._per_sample_bytes * self._total_count
+            effective = self._memory_budget.request(self._budget_name, total_needed)
+            self._apply_chunk_size(effective)
+        self._chunk_index = 0
+        self._load_current_chunk()
 
     def _locate(self, index: int) -> tuple[int, int]:
         lo, hi = 0, len(self._offsets) - 1
