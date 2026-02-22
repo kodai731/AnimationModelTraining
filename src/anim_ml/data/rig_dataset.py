@@ -109,6 +109,10 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         return self._loaded_count >= self._total_count
 
     @property
+    def num_chunks(self) -> int:
+        return self._num_chunks
+
+    @property
     def total_count(self) -> int:
         return self._total_count
 
@@ -210,10 +214,13 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
 
         return {key: self._cache[key][index] for key in _FIELD_DTYPES}
 
-    def reload_chunk(self) -> None:
+    def reload_chunk(self, chunk_index: int | None = None) -> None:
         if self.is_fully_loaded:
             return
-        self._chunk_index = (self._chunk_index + 1) % self._num_chunks
+        if chunk_index is not None:
+            self._chunk_index = chunk_index % self._num_chunks
+        else:
+            self._chunk_index = (self._chunk_index + 1) % self._num_chunks
         self._load_current_chunk()
 
     def close(self) -> None:

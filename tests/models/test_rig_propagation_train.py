@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import gc
+
 import h5py
 import numpy as np
 import pytest
@@ -26,8 +28,6 @@ from anim_ml.models.rig_propagation.train import (
     validate,
 )
 from anim_ml.utils.preparation_log import PreparationLog
-
-import gc
 
 NUM_TEST_JOINTS = 20
 PARENT_INDICES = [
@@ -197,11 +197,8 @@ class TestOverfitTinyBatch:
         hdf5_path = _create_test_hdf5(tmp_path)
         dataset = RigPropagationDataset([hdf5_path], split="train")
 
-        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-            dataset, batch_size=min(len(dataset), 32), shuffle=True, num_workers=0,
-        )
-
         config = _make_train_config()
+        config.training.batch_size = min(len(dataset), 32)
         config.training.epochs = 50
         config.training.learning_rate = 5e-3
         config.output.log_every_steps = 999
@@ -209,7 +206,7 @@ class TestOverfitTinyBatch:
         model = RigPropagationModel(config.model)
         device = torch.device("cpu")
 
-        steps_per_epoch = max(len(loader), 1)
+        steps_per_epoch = max(len(dataset) // config.training.batch_size, 1)
         optimizer, scheduler = create_optimizer_and_scheduler(
             model, config.training, steps_per_epoch,
         )
@@ -217,7 +214,9 @@ class TestOverfitTinyBatch:
         first_loss = None
         last_loss = None
         for epoch in range(1, config.training.epochs + 1):
-            metrics = train_one_epoch(model, loader, optimizer, scheduler, config, device, epoch)
+            metrics = train_one_epoch(
+                model, dataset, optimizer, scheduler, config, device, epoch,
+            )
             if first_loss is None:
                 first_loss = metrics["loss/train"]
             last_loss = metrics["loss/train"]
@@ -234,24 +233,23 @@ class TestLossDecreases:
         hdf5_path = _create_test_hdf5(tmp_path)
         dataset = RigPropagationDataset([hdf5_path], split="train")
 
-        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-            dataset, batch_size=min(len(dataset), 32), shuffle=True, num_workers=0,
-        )
-
         config = _make_train_config()
+        config.training.batch_size = min(len(dataset), 32)
         config.training.learning_rate = 5e-3
         config.output.log_every_steps = 999
         model = RigPropagationModel(config.model)
         device = torch.device("cpu")
 
-        steps_per_epoch = max(len(loader), 1)
+        steps_per_epoch = max(len(dataset) // config.training.batch_size, 1)
         optimizer, scheduler = create_optimizer_and_scheduler(
             model, config.training, steps_per_epoch,
         )
 
         epoch_losses = []
         for epoch in range(1, 6):
-            metrics = train_one_epoch(model, loader, optimizer, scheduler, config, device, epoch)
+            metrics = train_one_epoch(
+                model, dataset, optimizer, scheduler, config, device, epoch,
+            )
             epoch_losses.append(metrics["loss/train"])
 
         dataset.close()
@@ -264,21 +262,18 @@ class TestMemoryCleanupPreservesState:
         hdf5_path = _create_test_hdf5(tmp_path)
         dataset = RigPropagationDataset([hdf5_path], split="train")
 
-        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-            dataset, batch_size=min(len(dataset), 32), shuffle=True, num_workers=0,
-        )
-
         config = _make_train_config()
+        config.training.batch_size = min(len(dataset), 32)
         config.output.log_every_steps = 999
         model = RigPropagationModel(config.model)
         device = torch.device("cpu")
 
-        steps_per_epoch = max(len(loader), 1)
+        steps_per_epoch = max(len(dataset) // config.training.batch_size, 1)
         optimizer, scheduler = create_optimizer_and_scheduler(
             model, config.training, steps_per_epoch,
         )
 
-        train_one_epoch(model, loader, optimizer, scheduler, config, device, 1)
+        train_one_epoch(model, dataset, optimizer, scheduler, config, device, 1)
 
         weights_before = {k: v.clone() for k, v in model.state_dict().items()}
         scheduler_lr_before = scheduler.get_last_lr()[0]
@@ -304,24 +299,23 @@ class TestMemoryCleanupPreservesState:
         hdf5_path = _create_test_hdf5(tmp_path)
         dataset = RigPropagationDataset([hdf5_path], split="train")
 
-        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-            dataset, batch_size=min(len(dataset), 32), shuffle=True, num_workers=0,
-        )
-
         config = _make_train_config()
+        config.training.batch_size = min(len(dataset), 32)
         config.training.learning_rate = 5e-3
         config.output.log_every_steps = 999
         model = RigPropagationModel(config.model)
         device = torch.device("cpu")
 
-        steps_per_epoch = max(len(loader), 1)
+        steps_per_epoch = max(len(dataset) // config.training.batch_size, 1)
         optimizer, scheduler = create_optimizer_and_scheduler(
             model, config.training, steps_per_epoch,
         )
 
         epoch_losses = []
         for epoch in range(1, 6):
-            metrics = train_one_epoch(model, loader, optimizer, scheduler, config, device, epoch)
+            metrics = train_one_epoch(
+                model, dataset, optimizer, scheduler, config, device, epoch,
+            )
             epoch_losses.append(metrics["loss/train"])
             gc.collect()
 

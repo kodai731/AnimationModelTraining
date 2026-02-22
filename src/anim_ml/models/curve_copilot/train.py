@@ -170,12 +170,13 @@ def create_optimizer_and_scheduler(
 
 def train_one_epoch(
     model: CurveCopilotModel,
-    dataloader: DataLoader[dict[str, torch.Tensor]],
+    train_dataset: CurveCopilotDataset,
     optimizer: DmlAdamW,
     scheduler: torch.optim.lr_scheduler.LambdaLR,
     config: TrainConfig,
     device: torch.device,
     epoch: int,
+    pin_memory: bool = False,
     batch_timing: BatchTimingLog | None = None,
 ) -> dict[str, float]:
     model.train()
@@ -185,55 +186,73 @@ def train_one_epoch(
     if batch_timing:
         batch_timing.begin_epoch(epoch)
 
-    data_wait = 0.0
-    for step, batch in enumerate(dataloader):
-        if batch_timing:
-            data_wait = time.perf_counter() - batch_timing.data_start
+    num_chunks = 1 if train_dataset.is_fully_loaded else train_dataset.num_chunks
+    epoch_step = 0
 
-        context = batch["context_keyframes"].to(device, non_blocking=True)
-        prop_type = batch["property_type"].to(device, non_blocking=True)
-        topo_features = batch["topology_features"].to(device, non_blocking=True)
-        bone_name_tokens = batch["bone_name_tokens"].to(device, non_blocking=True)
-        query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
-        target = batch["target"].to(device, non_blocking=True)
+    for chunk_idx in range(num_chunks):
+        if num_chunks > 1:
+            train_dataset.reload_chunk(chunk_idx)
 
-        curve_window = None
-        if model.config.use_pae and "curve_window" in batch:
-            curve_window = batch["curve_window"].to(device, non_blocking=True)
-
-        compute_start = time.perf_counter()
-
-        with torch.no_grad():
-            last_context_value = context[:, -1, 1]
-            target_value = target[:, 1]
-            value_distance = torch.abs(target_value - last_context_value)
-            confidence_targets = torch.exp(-value_distance * 5.0).unsqueeze(-1)
-
-        prediction, confidence = model(
-            context, prop_type, topo_features, bone_name_tokens, query_time,
-            curve_window=curve_window,
-        )
-        loss, metrics = compute_loss(
-            prediction, confidence, target, config.training.loss_weights, confidence_targets,
+        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
+            train_dataset,
+            batch_size=config.training.batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=pin_memory,
+            drop_last=True,
         )
 
-        optimizer.zero_grad()
-        loss.backward()  # type: ignore[no-untyped-call]
-        nn.utils.clip_grad_norm_(model.parameters(), config.training.gradient_clip)
-        optimizer.step()  # type: ignore[no-untyped-call]
-        scheduler.step()
+        data_wait = 0.0
+        for batch in loader:
+            if batch_timing:
+                data_wait = time.perf_counter() - batch_timing.data_start
 
-        if batch_timing:
-            compute_elapsed = time.perf_counter() - compute_start
-            batch_timing.record_step(step, data_wait, compute_elapsed)
-            batch_timing.mark_data_start()
+            context = batch["context_keyframes"].to(device, non_blocking=True)
+            prop_type = batch["property_type"].to(device, non_blocking=True)
+            topo_features = batch["topology_features"].to(device, non_blocking=True)
+            bone_name_tokens = batch["bone_name_tokens"].to(device, non_blocking=True)
+            query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
+            target = batch["target"].to(device, non_blocking=True)
 
-        total_loss += metrics["loss/total"]
-        num_batches += 1
+            curve_window = None
+            if model.config.use_pae and "curve_window" in batch:
+                curve_window = batch["curve_window"].to(device, non_blocking=True)
 
-        if (step + 1) % config.output.log_every_steps == 0:
-            avg = total_loss / num_batches
-            print(f"  epoch {epoch} step {step + 1}: loss={avg:.4f}", flush=True)
+            compute_start = time.perf_counter()
+
+            with torch.no_grad():
+                last_context_value = context[:, -1, 1]
+                target_value = target[:, 1]
+                value_distance = torch.abs(target_value - last_context_value)
+                confidence_targets = torch.exp(-value_distance * 5.0).unsqueeze(-1)
+
+            prediction, confidence = model(
+                context, prop_type, topo_features, bone_name_tokens, query_time,
+                curve_window=curve_window,
+            )
+            loss, metrics = compute_loss(
+                prediction, confidence, target, config.training.loss_weights, confidence_targets,
+            )
+
+            optimizer.zero_grad()
+            loss.backward()  # type: ignore[no-untyped-call]
+            nn.utils.clip_grad_norm_(model.parameters(), config.training.gradient_clip)
+            optimizer.step()  # type: ignore[no-untyped-call]
+            scheduler.step()
+
+            if batch_timing:
+                compute_elapsed = time.perf_counter() - compute_start
+                batch_timing.record_step(epoch_step, data_wait, compute_elapsed)
+                batch_timing.mark_data_start()
+
+            total_loss += metrics["loss/total"]
+            num_batches += 1
+            epoch_step += 1
+
+            if epoch_step % config.output.log_every_steps == 0:
+                avg = total_loss / num_batches
+                chunk_info = f" [chunk {chunk_idx + 1}/{num_chunks}]" if num_chunks > 1 else ""
+                print(f"  epoch {epoch} step {epoch_step}{chunk_info}: loss={avg:.4f}", flush=True)
 
     if batch_timing:
         batch_timing.end_epoch()
@@ -377,14 +396,6 @@ def train(
     pin_memory = supports_pin_memory(device)
 
     prep_log.log("dataloader_create_start", num_workers=0)
-    train_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-        train_dataset,
-        batch_size=config.training.batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=pin_memory,
-        drop_last=True,
-    )
     val_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
         val_dataset,
         batch_size=config.training.batch_size,
@@ -394,7 +405,11 @@ def train(
     )
     prep_log.log("dataloader_create_done")
 
-    steps_per_epoch = max(len(train_loader), 1)
+    if train_dataset.is_fully_loaded:
+        steps_per_epoch = max(train_dataset.total_count // config.training.batch_size, 1)
+    else:
+        chunk_steps = len(train_dataset) // config.training.batch_size
+        steps_per_epoch = max(chunk_steps * train_dataset.num_chunks, 1)
     optimizer, scheduler = create_optimizer_and_scheduler(
         model, config.training, steps_per_epoch,
     )
@@ -428,15 +443,12 @@ def train(
 
     try:
         for epoch in range(start_epoch, config.training.epochs + 1):
-            if epoch > start_epoch and not train_dataset.is_fully_loaded:
-                train_dataset.reload_chunk()
-
             print(f"Epoch {epoch}/{config.training.epochs}", flush=True)
 
             with TimingLog.measure() as train_time:
                 train_metrics = train_one_epoch(
-                    model, train_loader, optimizer, scheduler,
-                    config, device, epoch, batch_timing,
+                    model, train_dataset, optimizer, scheduler,
+                    config, device, epoch, pin_memory, batch_timing,
                 )
 
             train_dataset.evict_cache()
