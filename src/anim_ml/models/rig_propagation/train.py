@@ -423,6 +423,13 @@ def train(
                 val_metrics = validate(model, val_loader, config, device)
 
             val_dataset.evict_cache()
+
+            tier_change = budget.refresh()
+            if tier_change:
+                old_mb = tier_change[0] // (1024 * 1024)
+                new_mb = tier_change[1] // (1024 * 1024)
+                print(f"  Memory tier changed: {old_mb} MB -> {new_mb} MB", flush=True)
+
             train_dataset.reload_cache()
 
             all_metrics = {**train_metrics, **val_metrics}
