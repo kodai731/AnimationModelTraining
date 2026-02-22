@@ -155,41 +155,52 @@ def _make_bezier_keyframes(
     ]
 
 
+def _make_dense_timeline(
+    times: list[float], values: list[float], num_points: int = 100,
+) -> tuple[np.ndarray, np.ndarray]:
+    dense_times = np.linspace(times[0], times[-1], num_points)
+    dense_values = np.interp(dense_times, times, values)
+    return dense_times, dense_values
+
+
 @pytest.mark.unit
 class TestNearConstantCurveSkipped:
     def test_identical_values_produce_no_samples(self) -> None:
-        keyframes = _make_bezier_keyframes(
-            times=[0.0, 0.5, 1.0, 1.5, 2.0],
-            values=[0.5, 0.5, 0.5, 0.5, 0.5],
-        )
+        kf_times = [0.0, 0.5, 1.0, 1.5, 2.0]
+        kf_values = [0.5, 0.5, 0.5, 0.5, 0.5]
+        keyframes = _make_bezier_keyframes(times=kf_times, values=kf_values)
+        dense_t, dense_v = _make_dense_timeline(kf_times, kf_values)
         samples = _generate_sliding_window_samples(
             keyframes, property_type=0,
             topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=2.0, joint_depth=0, scale=1.0,
+            times=dense_t, normalized_values=dense_v,
         )
         assert len(samples) == 0
 
     def test_tiny_variation_below_threshold_skipped(self) -> None:
-        keyframes = _make_bezier_keyframes(
-            times=[0.0, 0.5, 1.0, 1.5, 2.0],
-            values=[0.5, 0.5001, 0.5, 0.4999, 0.5],
-        )
+        kf_times = [0.0, 0.5, 1.0, 1.5, 2.0]
+        kf_values = [0.5, 0.5001, 0.5, 0.4999, 0.5]
+        keyframes = _make_bezier_keyframes(times=kf_times, values=kf_values)
+        dense_t, dense_v = _make_dense_timeline(kf_times, kf_values)
         samples = _generate_sliding_window_samples(
             keyframes, property_type=0,
             topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=2.0, joint_depth=0, scale=1.0,
+            times=dense_t, normalized_values=dense_v,
         )
         assert len(samples) == 0
 
     def test_sufficient_variation_produces_samples(self) -> None:
-        keyframes = _make_bezier_keyframes(
-            times=[0.0, 0.5, 1.0, 1.5, 2.0],
-            values=[0.0, 0.5, 1.0, 0.3, 0.8],
-        )
+        kf_times = [0.0, 0.5, 1.0, 1.5, 2.0]
+        kf_values = [0.0, 0.5, 1.0, 0.3, 0.8]
+        keyframes = _make_bezier_keyframes(times=kf_times, values=kf_values)
+        dense_t, dense_v = _make_dense_timeline(kf_times, kf_values)
         samples = _generate_sliding_window_samples(
             keyframes, property_type=0,
             topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=2.0, joint_depth=0, scale=1.0,
+            times=dense_t, normalized_values=dense_v,
         )
         assert len(samples) > 0
 
@@ -225,14 +236,15 @@ class TestNormalizedValueBound:
             )
 
     def test_synthetic_varying_curve_bounded(self) -> None:
-        keyframes = _make_bezier_keyframes(
-            times=[0.0, 0.3, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
-            values=[0.0, 0.2, -0.1, 0.5, 0.3, 0.8, 0.1, 0.6, 0.4, 0.9],
-        )
+        kf_times = [0.0, 0.3, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+        kf_values = [0.0, 0.2, -0.1, 0.5, 0.3, 0.8, 0.1, 0.6, 0.4, 0.9]
+        keyframes = _make_bezier_keyframes(times=kf_times, values=kf_values)
+        dense_t, dense_v = _make_dense_timeline(kf_times, kf_values)
         samples = _generate_sliding_window_samples(
             keyframes, property_type=3,
             topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=4.0, joint_depth=2, scale=90.0,
+            times=dense_t, normalized_values=dense_v,
         )
 
         for s in samples:
@@ -306,16 +318,16 @@ class TestCurveStdThreshold:
             )
 
     def test_gradual_increase_just_above_threshold(self) -> None:
-        values = [0.0 + i * (MIN_CURVE_STD * 0.6) for i in range(10)]
-        keyframes = _make_bezier_keyframes(
-            times=[i * 0.5 for i in range(10)],
-            values=values,
-        )
+        kf_values = [0.0 + i * (MIN_CURVE_STD * 0.6) for i in range(10)]
+        kf_times = [i * 0.5 for i in range(10)]
+        keyframes = _make_bezier_keyframes(times=kf_times, values=kf_values)
+        dense_t, dense_v = _make_dense_timeline(kf_times, kf_values)
 
         samples = _generate_sliding_window_samples(
             keyframes, property_type=0,
             topology_features=DUMMY_TOPO, bone_name_tokens=DUMMY_TOKENS,
             clip_duration=4.5, joint_depth=0, scale=1.0,
+            times=dense_t, normalized_values=dense_v,
         )
 
         for s in samples:

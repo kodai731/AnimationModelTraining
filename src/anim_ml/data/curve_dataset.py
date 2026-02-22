@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from anim_ml.utils.preparation_log import PreparationLog
 
 UNK_TOKEN = 1
+PAE_WINDOW_SIZE = 64
 
 _FIELD_DTYPES: dict[str, torch.dtype] = {
     "context_keyframes": torch.float32,
@@ -25,6 +26,11 @@ _FIELD_DTYPES: dict[str, torch.dtype] = {
     "topology_features": torch.float32,
     "bone_name_tokens": torch.int64,
     "query_time": torch.float32,
+    "curve_window": torch.float32,
+}
+
+_OPTIONAL_FALLBACK_SHAPES: dict[str, tuple[int, ...]] = {
+    "curve_window": (PAE_WINDOW_SIZE,),
 }
 
 _DTYPE_BYTE_SIZES: dict[torch.dtype, int] = {
@@ -152,8 +158,13 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
             for file_idx, local_start, local_end in file_slices:
                 with h5py.File(self._paths[file_idx], "r") as f:
                     split_grp = cast("h5py.Group", f[self._split])
-                    ds = cast("h5py.Dataset", split_grp[key])
-                    parts.append(torch.as_tensor(ds[local_start:local_end], dtype=dtype))
+                    if key not in split_grp and key in _OPTIONAL_FALLBACK_SHAPES:
+                        count = local_end - local_start
+                        fallback_shape = (count,) + _OPTIONAL_FALLBACK_SHAPES[key]
+                        parts.append(torch.zeros(fallback_shape, dtype=dtype))
+                    else:
+                        ds = cast("h5py.Dataset", split_grp[key])
+                        parts.append(torch.as_tensor(ds[local_start:local_end], dtype=dtype))
             self._cache[key] = torch.cat(parts)
             del parts
 
@@ -222,6 +233,7 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
             "topology_features": self._cache["topology_features"][index],
             "bone_name_tokens": tokens,
             "query_time": self._cache["query_time"][index],
+            "curve_window": self._cache["curve_window"][index],
         }
 
     def reload_chunk(self) -> None:
@@ -239,9 +251,12 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
 def _compute_per_sample_bytes(grp: h5py.Group) -> int:
     total = 0
     for key, dtype in _FIELD_DTYPES.items():
-        ds = cast("h5py.Dataset", grp[key])
-        shape = cast("tuple[int, ...]", ds.shape)  # pyright: ignore[reportUnknownMemberType]
-        sample_elements = math.prod(shape[1:]) if len(shape) > 1 else 1
+        if key not in grp and key in _OPTIONAL_FALLBACK_SHAPES:
+            sample_elements = math.prod(_OPTIONAL_FALLBACK_SHAPES[key])
+        else:
+            ds = cast("h5py.Dataset", grp[key])
+            shape = cast("tuple[int, ...]", ds.shape)  # pyright: ignore[reportUnknownMemberType]
+            sample_elements = math.prod(shape[1:]) if len(shape) > 1 else 1
         total += sample_elements * _DTYPE_BYTE_SIZES[dtype]
     return total
 

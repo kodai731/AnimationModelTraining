@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from anim_ml.models.bone_encoder import BoneEncoderConfig, BoneIdentityEncoder
+from anim_ml.models.periodic_autoencoder.model import PAEConfig, PAEEncoder
 
 
 @dataclass
@@ -27,6 +28,9 @@ class CurveCopilotConfig:
     periodic_time_encoding: bool = False
     num_experts: int = 3
     use_expert_mixing: bool = False
+    use_pae: bool = False
+    pae_window_size: int = 64
+    pae_latent_channels: int = 5
 
 
 class PeriodicTimeEncoder(nn.Module):
@@ -174,6 +178,17 @@ class CurveCopilotModel(nn.Module):
                 for _ in range(config.n_layers)
             ])
 
+        self.pae_encoder: PAEEncoder | None = None
+        self.phase_projection: nn.Linear | None = None
+        if config.use_pae:
+            pae_cfg = PAEConfig(
+                window_size=config.pae_window_size,
+                latent_channels=config.pae_latent_channels,
+                feature_dim=config.pae_latent_channels * 3,
+            )
+            self.pae_encoder = PAEEncoder(pae_cfg)
+            self.phase_projection = nn.Linear(pae_cfg.feature_dim, config.d_model)
+
         self.output_norm = nn.LayerNorm(config.d_model)
         self.prediction_head = nn.Linear(config.d_model, 6)
         self.confidence_head = nn.Linear(config.d_model, 1)
@@ -192,6 +207,7 @@ class CurveCopilotModel(nn.Module):
         topology_features: torch.Tensor,
         bone_name_tokens: torch.Tensor,
         query_time: torch.Tensor,
+        curve_window: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         seq_len = context_keyframes.shape[1]
         total_len = seq_len + 1
@@ -209,6 +225,11 @@ class CurveCopilotModel(nn.Module):
         bone_context = self.bone_identity_encoder(topology_features, bone_name_tokens)
         bone_embed = self.bone_context_projection(bone_context)
         condition = (prop_embed + bone_embed).unsqueeze(1)
+
+        if self.pae_encoder is not None and curve_window is not None:
+            phase_features = self.pae_encoder(curve_window)
+            phase_embed = self.phase_projection(phase_features).unsqueeze(1)  # type: ignore[union-attr]
+            condition = condition + phase_embed
 
         kf_positions: torch.Tensor = self.kf_positions[:seq_len]  # type: ignore[assignment]
         kf_embed = kf_embed + condition + self.positional_embedding(kf_positions).unsqueeze(0)

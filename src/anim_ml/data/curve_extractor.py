@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from anim_ml.data.bvh_parser import MotionData
 
 
+PAE_WINDOW_SIZE = 64
+
+
 @dataclass
 class CurveSample:
     context_keyframes: np.ndarray
@@ -27,6 +30,7 @@ class CurveSample:
     joint_depth: int
     curve_mean: float
     curve_std: float
+    curve_window: np.ndarray
 
 
 CONTEXT_LENGTH = 8
@@ -100,6 +104,8 @@ def extract_curve_samples(
                 clip_duration=duration,
                 joint_depth=depth,
                 scale=scale,
+                times=times,
+                normalized_values=normalized_values,
             )
             samples.extend(channel_samples)
 
@@ -161,6 +167,28 @@ def _get_channel_values(
     return rotations[:, joint_idx, channel_idx - 3].copy()
 
 
+def _sample_curve_window(
+    times: np.ndarray,
+    normalized_values: np.ndarray,
+    t_start: float,
+    t_end: float,
+    curve_mean: float,
+    curve_std: float,
+) -> np.ndarray:
+    if t_end - t_start < 1e-8 or len(times) < 2:
+        return np.zeros(PAE_WINDOW_SIZE, dtype=np.float32)
+
+    window_times = np.linspace(t_start, t_end, PAE_WINDOW_SIZE)
+
+    interpolator = interp1d(
+        times, normalized_values, kind="linear",
+        fill_value="extrapolate",  # type: ignore[arg-type]
+    )
+    window_values: np.ndarray = np.asarray(interpolator(window_times), dtype=np.float32)
+
+    return (window_values - curve_mean) / curve_std
+
+
 def _generate_sliding_window_samples(
     bezier_keyframes: list[BezierKeyframe],
     property_type: int,
@@ -169,6 +197,8 @@ def _generate_sliding_window_samples(
     clip_duration: float,
     joint_depth: int,
     scale: float,
+    times: np.ndarray,
+    normalized_values: np.ndarray,
 ) -> list[CurveSample]:
     if len(bezier_keyframes) < 2:
         return []
@@ -211,6 +241,12 @@ def _generate_sliding_window_samples(
             target_kf.tangent_out[1] / curve_std,
         ], dtype=np.float32)
 
+        curve_window = _sample_curve_window(
+            times, normalized_values,
+            context_kfs[0].time, target_kf.time,
+            curve_mean, curve_std,
+        )
+
         samples.append(CurveSample(
             context_keyframes=context_array,
             target_keyframe=target_array,
@@ -222,6 +258,7 @@ def _generate_sliding_window_samples(
             joint_depth=joint_depth,
             curve_mean=curve_mean * scale,
             curve_std=curve_std * scale,
+            curve_window=curve_window,
         ))
 
     return samples

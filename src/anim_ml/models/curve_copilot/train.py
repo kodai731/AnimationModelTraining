@@ -41,6 +41,8 @@ class TrainingConfig:
     gradient_clip: float = 1.0
     early_stopping_patience: int = 0
     loss_weights: LossWeights = field(default_factory=LossWeights)
+    pae_pretrained: str = ""
+    pae_learning_rate: float = 1e-5
 
 
 @dataclass
@@ -133,11 +135,25 @@ def create_optimizer_and_scheduler(
     config: TrainingConfig,
     steps_per_epoch: int,
 ) -> tuple[DmlAdamW, torch.optim.lr_scheduler.LambdaLR]:
-    optimizer = DmlAdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
+    pae_params = [p for n, p in model.named_parameters() if "pae_encoder" in n]
+
+    if pae_params:
+        other_params = [p for n, p in model.named_parameters() if "pae_encoder" not in n]
+        param_groups: list[dict[str, object]] = [
+            {"params": other_params, "lr": config.learning_rate},
+            {"params": pae_params, "lr": config.pae_learning_rate},
+        ]
+        optimizer = DmlAdamW(
+            param_groups,
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+        )
+    else:
+        optimizer = DmlAdamW(
+            model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+        )
 
     warmup_steps = config.warmup_epochs * steps_per_epoch
     total_steps = config.epochs * steps_per_epoch
@@ -181,6 +197,10 @@ def train_one_epoch(
         query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
         target = batch["target"].to(device, non_blocking=True)
 
+        curve_window = None
+        if model.config.use_pae and "curve_window" in batch:
+            curve_window = batch["curve_window"].to(device, non_blocking=True)
+
         compute_start = time.perf_counter()
 
         with torch.no_grad():
@@ -191,6 +211,7 @@ def train_one_epoch(
 
         prediction, confidence = model(
             context, prop_type, topo_features, bone_name_tokens, query_time,
+            curve_window=curve_window,
         )
         loss, metrics = compute_loss(
             prediction, confidence, target, config.training.loss_weights, confidence_targets,
@@ -239,6 +260,10 @@ def validate(
         query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
         target = batch["target"].to(device, non_blocking=True)
 
+        curve_window = None
+        if model.config.use_pae and "curve_window" in batch:
+            curve_window = batch["curve_window"].to(device, non_blocking=True)
+
         last_context_value = context[:, -1, 1]
         target_value = target[:, 1]
         value_distance = torch.abs(target_value - last_context_value)
@@ -246,6 +271,7 @@ def validate(
 
         prediction, confidence = model(
             context, prop_type, topo_features, bone_name_tokens, query_time,
+            curve_window=curve_window,
         )
         _, metrics = compute_loss(
             prediction, confidence, target, config.training.loss_weights, confidence_targets,
@@ -317,6 +343,13 @@ def train(
                  batch_size=config.training.batch_size)
 
     model = CurveCopilotModel(config.model).to(device)
+
+    if config.training.pae_pretrained and model.pae_encoder is not None:
+        pae_path = resolve_data_path(config.training.pae_pretrained)
+        pae_ckpt = torch.load(pae_path, map_location="cpu", weights_only=False)  # type: ignore[no-any-return]
+        model.pae_encoder.load_state_dict(pae_ckpt["encoder_state_dict"])
+        print(f"Loaded PAE pretrained weights from {pae_path}", flush=True)
+
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
     prep_log.log("model_created", params=sum(p.numel() for p in model.parameters()))
 

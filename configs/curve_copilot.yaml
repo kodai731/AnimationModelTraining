@@ -8,6 +8,9 @@ model:
   periodic_time_encoding: true
   num_experts: 3
   use_expert_mixing: true
+  use_pae: true
+  pae_window_size: 64
+  pae_latent_channels: 5
 
 training:
   batch_size: 2048

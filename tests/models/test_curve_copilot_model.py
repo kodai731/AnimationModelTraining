@@ -14,15 +14,22 @@ from anim_ml.models.curve_copilot.model import (
 
 
 def _make_dummy_input(
-    batch: int = 2, seq_len: int = 8, device: str = "cpu",
+    batch: int = 2,
+    seq_len: int = 8,
+    device: str = "cpu",
+    include_curve_window: bool = False,
+    window_size: int = 64,
 ) -> dict[str, torch.Tensor]:
-    return {
+    inputs: dict[str, torch.Tensor] = {
         "context_keyframes": torch.randn(batch, seq_len, 6, device=device),
         "property_type": torch.randint(0, 9, (batch,), device=device),
         "topology_features": torch.rand(batch, 6, device=device),
         "bone_name_tokens": torch.randint(0, 64, (batch, 32), device=device),
         "query_time": torch.rand(batch, device=device),
     }
+    if include_curve_window:
+        inputs["curve_window"] = torch.randn(batch, window_size, device=device)
+    return inputs
 
 
 @pytest.mark.unit
@@ -364,3 +371,70 @@ class TestExpertMixingWithPeriodic:
         model = CurveCopilotModel(config)
         params = count_parameters(model)
         assert 1_000_000 <= params <= 5_000_000, f"Parameter count {params} out of range"
+
+
+def _make_pae_config(**overrides: object) -> CurveCopilotConfig:
+    defaults: dict[str, object] = {
+        "use_pae": True,
+        "periodic_time_encoding": True,
+        "use_expert_mixing": True,
+        "num_experts": 3,
+    }
+    defaults.update(overrides)
+    return CurveCopilotConfig(**defaults)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+class TestPAEIntegration:
+    def test_forward_pass(self) -> None:
+        config = _make_pae_config()
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input(include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)
+
+    def test_output_shapes_unchanged(self) -> None:
+        config = _make_pae_config()
+        model = CurveCopilotModel(config)
+        batch = 4
+        inputs = _make_dummy_input(batch=batch, include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (batch, 6)
+        assert confidence.shape == (batch, 1)
+
+    def test_within_budget(self) -> None:
+        config = _make_pae_config()
+        model = CurveCopilotModel(config)
+        params = count_parameters(model)
+        assert 1_000_000 <= params <= 5_000_000, f"Parameter count {params} out of range"
+
+    @pytest.mark.parametrize("seq_len", [1, 2, 4, 8])
+    def test_variable_sequence_length(self, seq_len: int) -> None:
+        config = _make_pae_config()
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input(batch=2, seq_len=seq_len, include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)
+
+    def test_all_parameters_receive_gradients(self) -> None:
+        config = _make_pae_config()
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input(include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        loss = prediction.sum() + confidence.sum()
+        loss.backward()
+
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert param.grad is not None, f"No gradient for {name}"
+                assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+
+    def test_without_curve_window(self) -> None:
+        config = _make_pae_config()
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input(include_curve_window=False)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)

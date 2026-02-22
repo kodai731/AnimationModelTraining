@@ -66,6 +66,10 @@ def _create_test_hdf5(tmp_path: Path) -> Path:
                 data=np.array([s.query_time for s in samples], dtype=np.float32),
             )
             grp.create_dataset(
+                "curve_window",
+                data=np.stack([s.curve_window for s in samples]),
+            )
+            grp.create_dataset(
                 "curve_mean",
                 data=np.array([s.curve_mean for s in samples], dtype=np.float32),
             )
@@ -271,6 +275,9 @@ class TestConfigLoading:
         assert config.output.checkpoint_dir == "runs/curve_copilot"
         assert config.model.use_expert_mixing is True
         assert config.model.num_experts == 3
+        assert config.model.use_pae is True
+        assert config.model.pae_window_size == 64
+        assert config.model.pae_latent_channels == 5
         assert len(config.data.train_files) >= 1
         assert all(f.endswith(".h5") for f in config.data.train_files)
 

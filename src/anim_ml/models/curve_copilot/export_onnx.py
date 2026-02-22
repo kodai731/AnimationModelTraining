@@ -68,18 +68,27 @@ def export_to_onnx(
     dummy_tokens = torch.zeros(2, 32, dtype=torch.long, device=device)
     dummy_time = torch.tensor([0.5, 0.3], device=device)
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-
+    args: tuple[torch.Tensor, ...] = (
+        dummy_context, dummy_prop, dummy_topo, dummy_tokens, dummy_time,
+    )
     input_names = [
         "context_keyframes", "property_type",
         "topology_features", "bone_name_tokens", "query_time",
     ]
+
+    if model.config.use_pae:
+        dummy_curve_window = torch.randn(2, model.config.pae_window_size, device=device)
+        args = args + (dummy_curve_window,)
+        input_names.append("curve_window")
+
     output_names = ["prediction", "confidence"]
     dynamic_axes = {name: {0: "batch"} for name in input_names + output_names}
 
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
     torch.onnx.export(  # type: ignore[reportUnknownMemberType]
         model,
-        (dummy_context, dummy_prop, dummy_topo, dummy_tokens, dummy_time),
+        args,
         str(output_path),
         opset_version=opset_version,
         input_names=input_names,
