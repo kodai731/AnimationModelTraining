@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 from typing import TYPE_CHECKING, cast
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
@@ -90,6 +91,7 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         self._apply_chunk_size(effective_budget)
 
         self._chunk_index = 0
+        self._epoch_offset: int = 0
         self._cache: dict[str, torch.Tensor] = {}
         self._loaded_count = 0
 
@@ -139,17 +141,29 @@ class RigPropagationDataset(Dataset[dict[str, torch.Tensor]]):
         else:
             self._num_chunks = 1
 
+    def begin_epoch(self, epoch: int) -> None:
+        if self._chunk_size < self._total_count:
+            self._epoch_offset = random.Random(epoch).randint(0, self._chunk_size - 1)
+        else:
+            self._epoch_offset = 0
+
     def _load_current_chunk(self) -> None:
         if self._total_count == 0 or self._chunk_size == 0:
             self._loaded_count = 0
             return
 
-        chunk_start = self._chunk_index * self._chunk_size
-        chunk_count = min(self._chunk_size, self._total_count - chunk_start)
+        samples_before = self._chunk_index * self._chunk_size
+        chunk_count = min(self._chunk_size, self._total_count - samples_before)
+        chunk_start = (self._epoch_offset + samples_before) % self._total_count
 
         self._cache.clear()
 
-        file_slices = self._collect_file_slices(chunk_start, chunk_count)
+        tail = self._total_count - chunk_start
+        if chunk_count <= tail:
+            file_slices = self._collect_file_slices(chunk_start, chunk_count)
+        else:
+            file_slices = self._collect_file_slices(chunk_start, tail)
+            file_slices += self._collect_file_slices(0, chunk_count - tail)
 
         for key, dtype in _FIELD_DTYPES.items():
             parts: list[torch.Tensor] = []

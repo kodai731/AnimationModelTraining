@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import math
+import random
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -189,7 +190,11 @@ def train_one_epoch(
     num_chunks = 1 if train_dataset.is_fully_loaded else train_dataset.num_chunks
     epoch_step = 0
 
-    for chunk_idx in range(num_chunks):
+    train_dataset.begin_epoch(epoch)
+    chunk_order = list(range(num_chunks))
+    random.Random(epoch).shuffle(chunk_order)
+
+    for chunk_idx in chunk_order:
         if num_chunks > 1:
             train_dataset.reload_chunk(chunk_idx)
 

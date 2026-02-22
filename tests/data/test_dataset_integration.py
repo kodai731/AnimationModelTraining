@@ -228,3 +228,84 @@ class TestMemoryOptimization:
 
         assert total == len(dataset)
         dataset.close()
+
+
+def _create_chunked_curve_dataset(
+    tmp_path: Path, *, num_files: int = 3,
+) -> tuple[CurveCopilotDataset, list[Path]]:
+    paths = [_create_test_hdf5(tmp_path / str(i)) for i in range(num_files)]
+
+    full_ds = CurveCopilotDataset(paths, split="val")
+    per_sample = full_ds._per_sample_bytes
+    total = full_ds.total_count
+    full_ds.close()
+
+    budget = per_sample * max(total // 3, 2)
+    ds = CurveCopilotDataset(paths, split="val", cache_budget_bytes=budget)
+    assert not ds.is_fully_loaded
+    assert ds._chunk_size > 1
+    return ds, paths
+
+
+@pytest.mark.unit
+class TestChunkRandomization:
+    def test_begin_epoch_sets_offset_in_range(self, tmp_path: Path) -> None:
+        dataset, _ = _create_chunked_curve_dataset(tmp_path)
+
+        for epoch in range(10):
+            dataset.begin_epoch(epoch)
+            assert 0 <= dataset._epoch_offset < dataset._chunk_size
+
+        dataset.close()
+
+    def test_begin_epoch_no_offset_when_fully_loaded(self, tmp_path: Path) -> None:
+        hdf5_path = _create_test_hdf5(tmp_path)
+        dataset = CurveCopilotDataset([hdf5_path], split="train")
+        assert dataset.is_fully_loaded
+
+        dataset.begin_epoch(42)
+        assert dataset._epoch_offset == 0
+        dataset.close()
+
+    def test_different_epochs_produce_different_offsets(self, tmp_path: Path) -> None:
+        dataset, _ = _create_chunked_curve_dataset(tmp_path)
+
+        offsets = set()
+        for epoch in range(20):
+            dataset.begin_epoch(epoch)
+            offsets.add(dataset._epoch_offset)
+
+        assert len(offsets) > 1
+        dataset.close()
+
+    def test_all_samples_covered_across_chunks(self, tmp_path: Path) -> None:
+        paths = [_create_test_hdf5(tmp_path / d) for d in ("fa", "fb", "fc")]
+
+        full_ds = CurveCopilotDataset(paths, split="val")
+        total = full_ds.total_count
+        expected = {full_ds[i]["target"].numpy().tobytes() for i in range(total)}
+        full_ds.close()
+
+        chunked_ds, _ = _create_chunked_curve_dataset(tmp_path / "chunked")
+
+        chunked_ds.begin_epoch(7)
+        collected: set[bytes] = set()
+        for chunk_idx in range(chunked_ds.num_chunks):
+            chunked_ds.reload_chunk(chunk_idx)
+            for i in range(len(chunked_ds)):
+                collected.add(chunked_ds[i]["target"].numpy().tobytes())
+
+        assert collected == expected
+        chunked_ds.close()
+
+    def test_begin_epoch_is_reproducible(self, tmp_path: Path) -> None:
+        dataset, _ = _create_chunked_curve_dataset(tmp_path)
+
+        dataset.begin_epoch(3)
+        offset_first = dataset._epoch_offset
+
+        dataset.begin_epoch(3)
+        offset_second = dataset._epoch_offset
+
+        assert offset_first == offset_second
+        dataset.close()
