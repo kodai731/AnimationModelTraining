@@ -107,9 +107,9 @@ def compute_loss(
     tangent_magnitude = cast("torch.Tensor", tangent_norms)
     interp_target = (tangent_magnitude > 0.01).float()
     logits = prediction[:, 5]
-    interp_loss = nn.functional.binary_cross_entropy_with_logits(
-        logits, interp_target,
-    )
+    interp_loss = (
+        logits.clamp(min=0) - logits * interp_target + torch.log1p(torch.exp(-logits.abs()))
+    ).mean()
 
     confidence_loss = mse(confidence, confidence_targets)
 
