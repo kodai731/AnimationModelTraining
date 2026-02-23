@@ -107,14 +107,18 @@ class TestComputeLoss:
         target = torch.randn(4, 6)
         weights = LossWeights()
         confidence_targets = torch.rand(4, 1)
+        context = torch.randn(4, 8, 6)
 
-        loss, metrics = compute_loss(prediction, confidence, target, weights, confidence_targets)
+        loss, metrics = compute_loss(
+            prediction, confidence, target, weights, confidence_targets, context,
+        )
 
         assert loss.shape == ()
         assert loss.requires_grad
         assert "loss/total" in metrics
         assert "loss/value" in metrics
         assert "loss/tangent" in metrics
+        assert "loss/smoothness" in metrics
 
     def test_zero_loss_for_perfect_prediction(self) -> None:
         target = torch.tensor([[0.5, 1.0, 0.1, 0.2, 0.3, 0.4]])
@@ -122,7 +126,9 @@ class TestComputeLoss:
         confidence = torch.ones(1, 1)
         confidence_targets = torch.ones(1, 1)
 
-        _, metrics = compute_loss(prediction, confidence, target, LossWeights(), confidence_targets)
+        _, metrics = compute_loss(
+            prediction, confidence, target, LossWeights(), confidence_targets,
+        )
 
         assert metrics["loss/value"] < 1e-6
         assert metrics["loss/tangent"] < 1e-6

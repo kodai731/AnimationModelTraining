@@ -62,7 +62,7 @@ def export_to_onnx(
     device = next(model.parameters()).device
     max_seq = model.config.max_seq
 
-    dummy_context = torch.randn(2, max_seq, 6, device=device)
+    dummy_context = torch.randn(2, max_seq, model.config.keyframe_dim, device=device)
     dummy_prop = torch.zeros(2, dtype=torch.long, device=device)
     dummy_topo = torch.randn(2, 6, device=device)
     dummy_tokens = torch.zeros(2, 32, dtype=torch.long, device=device)

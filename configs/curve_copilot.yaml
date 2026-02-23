@@ -25,6 +25,7 @@ training:
     tangent: 0.5
     interpolation: 0.3
     confidence: 0.2
+    smoothness: 0.1
 
 data:
   train_files:

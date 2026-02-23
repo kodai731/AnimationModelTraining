@@ -30,6 +30,7 @@ class LossWeights:
     tangent: float = 0.5
     interpolation: float = 0.3
     confidence: float = 0.2
+    smoothness: float = 0.1
 
 
 @dataclass
@@ -96,10 +97,11 @@ def compute_loss(
     target: torch.Tensor,
     weights: LossWeights,
     confidence_targets: torch.Tensor,
+    context: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     mse = nn.functional.mse_loss
 
-    value_loss = mse(prediction[:, 0], target[:, 1])
+    value_loss = nn.functional.huber_loss(prediction[:, 0], target[:, 1], delta=1.0)
     tangent_loss = mse(prediction[:, 1:5], target[:, 2:6])
 
     tangent_norms = torch.norm(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -114,11 +116,19 @@ def compute_loss(
 
     confidence_loss = mse(confidence, confidence_targets)
 
+    smoothness_loss = torch.tensor(0.0, device=prediction.device)
+    if context is not None:
+        context_velocity = context[:, -1, 1] - context[:, -2, 1]
+        predicted_velocity = prediction[:, 0] - context[:, -1, 1]
+        implied_acceleration = predicted_velocity - context_velocity
+        smoothness_loss = implied_acceleration.pow(2).mean()
+
     total = (
         weights.value * value_loss
         + weights.tangent * tangent_loss
         + weights.interpolation * interp_loss
         + weights.confidence * confidence_loss
+        + weights.smoothness * smoothness_loss
     )
 
     metrics = {
@@ -127,6 +137,7 @@ def compute_loss(
         "loss/tangent": tangent_loss.item(),
         "loss/interpolation": interp_loss.item(),
         "loss/confidence": confidence_loss.item(),
+        "loss/smoothness": smoothness_loss.item(),
     }
     return total, metrics
 
@@ -236,7 +247,8 @@ def train_one_epoch(
                 curve_window=curve_window,
             )
             loss, metrics = compute_loss(
-                prediction, confidence, target, config.training.loss_weights, confidence_targets,
+                prediction, confidence, target, config.training.loss_weights,
+                confidence_targets, context,
             )
 
             optimizer.zero_grad()
@@ -265,7 +277,7 @@ def train_one_epoch(
 
     n = max(num_batches, 1)
     result = {f"train/{k.removeprefix('loss/')}": v / n for k, v in accumulated.items()}
-    for key in ("total", "value", "tangent", "interpolation", "confidence"):
+    for key in ("total", "value", "tangent", "interpolation", "confidence", "smoothness"):
         result.setdefault(f"train/{key}", 0.0)
     return result
 
@@ -303,7 +315,8 @@ def validate(
             curve_window=curve_window,
         )
         _, metrics = compute_loss(
-            prediction, confidence, target, config.training.loss_weights, confidence_targets,
+            prediction, confidence, target, config.training.loss_weights,
+            confidence_targets, context,
         )
 
         for key, val in metrics.items():
@@ -312,7 +325,7 @@ def validate(
 
     n = max(num_batches, 1)
     result = {f"val/{k.removeprefix('loss/')}": v / n for k, v in accumulated.items()}
-    for key in ("total", "value", "tangent", "interpolation", "confidence"):
+    for key in ("total", "value", "tangent", "interpolation", "confidence", "smoothness"):
         result.setdefault(f"val/{key}", 0.0)
     return result
 
@@ -490,7 +503,8 @@ def train(
                 f"  (v={val_metrics['val/value']:.4f}"
                 f" t={val_metrics['val/tangent']:.4f}"
                 f" i={val_metrics['val/interpolation']:.4f}"
-                f" c={val_metrics['val/confidence']:.4f})",
+                f" c={val_metrics['val/confidence']:.4f}"
+                f" s={val_metrics['val/smoothness']:.4f})",
                 flush=True,
             )
 
@@ -527,6 +541,7 @@ def train(
                     ("tangent", f"{phase}/tangent"),
                     ("interp", f"{phase}/interpolation"),
                     ("confidence", f"{phase}/confidence"),
+                    ("smoothness", f"{phase}/smoothness"),
                 ]
             }
             timing_log.write_epoch(epoch, {

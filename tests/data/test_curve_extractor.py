@@ -369,7 +369,7 @@ class TestLossReasonable:
             confidence_targets = torch.exp(-value_distance * 5.0).unsqueeze(-1)
 
             loss, metrics = compute_loss(
-                prediction, confidence, target, LossWeights(), confidence_targets,
+                prediction, confidence, target, LossWeights(), confidence_targets, context,
             )
 
         assert loss.item() < 1000.0, f"Initial loss too high: {loss.item()}"

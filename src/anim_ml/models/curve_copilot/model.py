@@ -138,9 +138,10 @@ class CurveCopilotModel(nn.Module):
         if config.periodic_time_encoding:
             self.time_encoder = PeriodicTimeEncoder()
 
-        kf_proj_dim = (
-            config.keyframe_dim + 2 if config.periodic_time_encoding else config.keyframe_dim
-        )
+        motion_feature_dim = 2
+        kf_proj_dim = config.keyframe_dim + motion_feature_dim
+        if config.periodic_time_encoding:
+            kf_proj_dim += 2
         self.keyframe_projection = nn.Linear(kf_proj_dim, config.d_model)
         self.property_type_embedding = nn.Embedding(config.num_property_types, config.d_model)
         bone_cfg = BoneEncoderConfig(
@@ -200,6 +201,17 @@ class CurveCopilotModel(nn.Module):
         self.register_buffer("kf_positions", torch.arange(config.max_seq))
         self.register_buffer("query_position", torch.tensor([config.max_seq]))
 
+    def _compute_motion_features(self, context_keyframes: torch.Tensor) -> torch.Tensor:
+        values = context_keyframes[:, :, 1]
+
+        velocity = torch.zeros_like(values)
+        velocity[:, 1:] = values[:, 1:] - values[:, :-1]
+
+        acceleration = torch.zeros_like(values)
+        acceleration[:, 2:] = velocity[:, 2:] - velocity[:, 1:-1]
+
+        return torch.stack([velocity, acceleration], dim=-1)
+
     def forward(
         self,
         context_keyframes: torch.Tensor,
@@ -212,14 +224,17 @@ class CurveCopilotModel(nn.Module):
         seq_len = context_keyframes.shape[1]
         total_len = seq_len + 1
 
+        motion_features = self._compute_motion_features(context_keyframes)
+
         if self.periodic_time_encoding:
             kf_time = context_keyframes[:, :, 0]
             kf_time_encoded = self.time_encoder(kf_time)
             kf_rest = context_keyframes[:, :, 1:]
-            kf_augmented = torch.cat([kf_time_encoded, kf_rest], dim=-1)
+            kf_augmented = torch.cat([kf_time_encoded, kf_rest, motion_features], dim=-1)
             kf_embed = self.keyframe_projection(kf_augmented)
         else:
-            kf_embed = self.keyframe_projection(context_keyframes)
+            kf_augmented = torch.cat([context_keyframes, motion_features], dim=-1)
+            kf_embed = self.keyframe_projection(kf_augmented)
 
         prop_embed = self.property_type_embedding(property_type)
         bone_context = self.bone_identity_encoder(topology_features, bone_name_tokens)
