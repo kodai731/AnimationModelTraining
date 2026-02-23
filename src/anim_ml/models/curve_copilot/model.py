@@ -35,6 +35,7 @@ class CurveCopilotConfig:
     use_multi_resolution: bool = False
     multi_res_branch_dim: int = 32
     use_phase_detection: bool = False
+    max_steps: int = 1
 
 
 class PeriodicTimeEncoder(nn.Module):
@@ -269,7 +270,7 @@ class CurveCopilotModel(nn.Module):
         )
         self.bone_identity_encoder = BoneIdentityEncoder(bone_cfg)
         self.bone_context_projection = nn.Linear(config.bone_context_dim, config.d_model)
-        self.positional_embedding = nn.Embedding(config.max_seq + 1, config.d_model)
+        self.positional_embedding = nn.Embedding(config.max_seq + config.max_steps, config.d_model)
         query_time_input_dim = 3 if config.periodic_time_encoding else 1
         self.query_time_projection = nn.Linear(query_time_input_dim, config.d_model)
 
@@ -320,12 +321,16 @@ class CurveCopilotModel(nn.Module):
         self.prediction_head = nn.Linear(config.d_model, 6)
         self.confidence_head = nn.Linear(config.d_model, 1)
 
+        total_positions = config.max_seq + config.max_steps
         full_mask = torch.triu(
-            torch.ones(config.max_seq + 1, config.max_seq + 1), diagonal=1,
+            torch.ones(total_positions, total_positions), diagonal=1,
         ).bool()
         self.register_buffer("causal_mask", full_mask)
         self.register_buffer("kf_positions", torch.arange(config.max_seq))
-        self.register_buffer("query_position", torch.tensor([config.max_seq]))
+        self.register_buffer(
+            "query_positions",
+            torch.arange(config.max_seq, config.max_seq + config.max_steps),
+        )
 
     def _compute_motion_features(self, context_keyframes: torch.Tensor) -> torch.Tensor:
         values = context_keyframes[:, :, 1]
@@ -356,11 +361,15 @@ class CurveCopilotModel(nn.Module):
         property_type: torch.Tensor,
         topology_features: torch.Tensor,
         bone_name_tokens: torch.Tensor,
-        query_time: torch.Tensor,
+        query_times: torch.Tensor,
         curve_window: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if query_times.ndim == 1:
+            query_times = query_times.unsqueeze(-1)
+
+        num_steps = query_times.shape[1]
         seq_len = context_keyframes.shape[1]
-        total_len = seq_len + 1
+        total_len = seq_len + num_steps
 
         motion_features = self._compute_motion_features(context_keyframes)
 
@@ -388,7 +397,7 @@ class CurveCopilotModel(nn.Module):
             multi_res_embed = self.multi_res_encoder(curve_window).unsqueeze(1)
             condition = condition + multi_res_embed
 
-        phase_query_embed = None
+        base_phase = period = amplitude = None
         if self.phase_detector is not None and curve_window is not None:
             base_phase, period, amplitude = self.phase_detector.extract_phase_params(
                 curve_window,
@@ -397,30 +406,42 @@ class CurveCopilotModel(nn.Module):
                 base_phase, period, amplitude,
             ).unsqueeze(1)
             condition = condition + phase_context
-            phase_query_embed = self.phase_detector.compute_query_phase_encoding(
-                query_time, base_phase, period, amplitude,
-            )
 
         kf_positions: torch.Tensor = self.kf_positions[:seq_len]  # type: ignore[assignment]
         kf_embed = kf_embed + condition + self.positional_embedding(kf_positions).unsqueeze(0)
 
-        query_position: torch.Tensor = self.query_position  # type: ignore[assignment]
+        query_positions: torch.Tensor = self.query_positions[:num_steps]  # type: ignore[assignment]
+        condition_squeezed = condition.squeeze(1)
+        query_tokens: list[torch.Tensor] = []
 
-        if self.periodic_time_encoding:
-            query_time_input = self.time_encoder(query_time)
-        else:
-            query_time_input = query_time.unsqueeze(-1)
+        for step in range(num_steps):
+            step_time = query_times[:, step]
 
-        query_token = (
-            self.query_time_projection(query_time_input)
-            + condition.squeeze(1)
-            + self.positional_embedding(query_position)
-        )
-        if phase_query_embed is not None:
-            query_token = query_token + phase_query_embed
-        query_token = query_token.unsqueeze(1)
+            if self.periodic_time_encoding:
+                query_time_input = self.time_encoder(step_time)
+            else:
+                query_time_input = step_time.unsqueeze(-1)
 
-        x = torch.cat([kf_embed, query_token], dim=1)
+            query_token = (
+                self.query_time_projection(query_time_input)
+                + condition_squeezed
+                + self.positional_embedding(query_positions[step])
+            )
+
+            if (
+                self.phase_detector is not None
+                and base_phase is not None
+                and period is not None
+                and amplitude is not None
+            ):
+                phase_query_embed = self.phase_detector.compute_query_phase_encoding(
+                    step_time, base_phase, period, amplitude,
+                )
+                query_token = query_token + phase_query_embed
+
+            query_tokens.append(query_token.unsqueeze(1))
+
+        x = torch.cat([kf_embed] + query_tokens, dim=1)
 
         causal_mask: torch.Tensor = self.causal_mask  # type: ignore[assignment]
         mask = causal_mask[:total_len, :total_len]
@@ -438,11 +459,11 @@ class CurveCopilotModel(nn.Module):
             for block in self.blocks:
                 x = block(x, mask)
 
-        last_token = self.output_norm(x)[:, -1, :]
-        prediction = self.prediction_head(last_token)
-        confidence = torch.sigmoid(self.confidence_head(last_token.detach()))
+        query_hidden = self.output_norm(x)[:, seq_len:, :]
+        predictions = self.prediction_head(query_hidden)
+        confidences = torch.sigmoid(self.confidence_head(query_hidden.detach()))
 
-        return prediction, confidence
+        return predictions, confidences
 
 
 def count_parameters(model: nn.Module) -> int:

@@ -46,6 +46,7 @@ class TrainingConfig:
     loss_weights: LossWeights = field(default_factory=LossWeights)
     pae_pretrained: str = ""
     pae_learning_rate: float = 1e-5
+    step_decay: list[float] = field(default_factory=lambda: [1.0])
 
 
 @dataclass
@@ -79,7 +80,8 @@ def load_config(config_path: str | Path) -> TrainConfig:
     training_raw = raw.get("training", {})
     loss_raw = training_raw.pop("loss_weights", {})
     loss_weights = LossWeights(**loss_raw)
-    training_cfg = TrainingConfig(**training_raw, loss_weights=loss_weights)
+    step_decay = training_raw.pop("step_decay", [1.0])
+    training_cfg = TrainingConfig(**training_raw, loss_weights=loss_weights, step_decay=step_decay)
 
     data_cfg = DataConfig(**raw.get("data", {}))
     output_cfg = OutputConfig(**raw.get("output", {}))
@@ -90,6 +92,14 @@ def load_config(config_path: str | Path) -> TrainConfig:
         data=data_cfg,
         output=output_cfg,
     )
+
+
+def _huber_loss(input: torch.Tensor, target: torch.Tensor, delta: float = 1.0) -> torch.Tensor:
+    error = input - target
+    abs_error = error.abs()
+    quadratic = torch.clamp(abs_error, max=delta)
+    linear = abs_error - quadratic
+    return (0.5 * quadratic.pow(2) + delta * linear).mean()
 
 
 def compute_frequency_loss(
@@ -104,19 +114,20 @@ def compute_frequency_loss(
 
     pred_spectrum = cast(
         "torch.Tensor",
-        torch.fft.rfft(pred_sequence, dim=1).abs(),  # pyright: ignore[reportUnknownMemberType]
+        torch.fft.rfft(pred_sequence.cpu(), dim=1).abs(),  # pyright: ignore[reportUnknownMemberType]
     )
     target_spectrum = cast(
         "torch.Tensor",
-        torch.fft.rfft(target_sequence, dim=1).abs(),  # pyright: ignore[reportUnknownMemberType]
+        torch.fft.rfft(target_sequence.cpu(), dim=1).abs(),  # pyright: ignore[reportUnknownMemberType]
     )
 
     num_freqs: int = pred_spectrum.shape[1]
     freq_weights = torch.exp(
-        -0.5 * torch.arange(num_freqs, dtype=torch.float32, device=context.device),
+        -0.5 * torch.arange(num_freqs, dtype=torch.float32),
     )
 
-    return ((pred_spectrum - target_spectrum).pow(2) * freq_weights.unsqueeze(0)).mean()
+    loss = ((pred_spectrum - target_spectrum).pow(2) * freq_weights.unsqueeze(0)).mean()
+    return loss.to(context.device)
 
 
 def compute_loss(
@@ -129,7 +140,7 @@ def compute_loss(
 ) -> tuple[torch.Tensor, dict[str, float]]:
     mse = nn.functional.mse_loss
 
-    value_loss = nn.functional.huber_loss(prediction[:, 0], target[:, 1], delta=1.0)
+    value_loss = _huber_loss(prediction[:, 0], target[:, 1], delta=1.0)
     tangent_loss = mse(prediction[:, 1:5], target[:, 2:6])
 
     tangent_norms = torch.norm(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -176,6 +187,56 @@ def compute_loss(
         "loss/frequency": frequency_loss.item(),
     }
     return total, metrics
+
+
+def compute_multistep_loss(
+    predictions: torch.Tensor,
+    confidences: torch.Tensor,
+    targets: torch.Tensor,
+    valid_steps: torch.Tensor,
+    weights: LossWeights,
+    context: torch.Tensor,
+    step_decay: list[float],
+) -> tuple[torch.Tensor, dict[str, float]]:
+    num_steps = predictions.shape[1]
+    total_loss = torch.tensor(0.0, device=predictions.device)
+    merged_metrics: dict[str, float] = {}
+
+    for step in range(num_steps):
+        step_mask = valid_steps > step
+        if not step_mask.any():
+            break
+
+        step_pred = predictions[step_mask, step, :]
+        step_conf = confidences[step_mask, step, :]
+        step_target = targets[step_mask, step, :]
+        step_context = context[step_mask]
+
+        with torch.no_grad():
+            last_context_value = step_context[:, -1, 1]
+            target_value = step_target[:, 1]
+            value_distance = torch.abs(target_value - last_context_value)
+            confidence_targets = torch.exp(-value_distance * 5.0) * (0.9 ** step)
+            confidence_targets = confidence_targets.unsqueeze(-1)
+
+        use_context = step_context if step == 0 else None
+        step_loss, step_metrics = compute_loss(
+            step_pred, step_conf, step_target, weights,
+            confidence_targets, use_context,
+        )
+
+        decay = step_decay[step] if step < len(step_decay) else step_decay[-1]
+        total_loss = total_loss + decay * step_loss
+
+        for key, val in step_metrics.items():
+            merged_metrics[f"step{step}/{key}"] = val
+
+        if step == 0:
+            for key, val in step_metrics.items():
+                merged_metrics[key] = val
+
+    merged_metrics["loss/total"] = total_loss.item()
+    return total_loss, merged_metrics
 
 
 def create_optimizer_and_scheduler(
@@ -263,8 +324,9 @@ def train_one_epoch(
             prop_type = batch["property_type"].to(device, non_blocking=True)
             topo_features = batch["topology_features"].to(device, non_blocking=True)
             bone_name_tokens = batch["bone_name_tokens"].to(device, non_blocking=True)
-            query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
+            query_times = batch["query_times"].to(device, non_blocking=True)
             target = batch["target"].to(device, non_blocking=True)
+            valid_steps = batch["valid_steps"].to(device, non_blocking=True)
 
             curve_window = None
             if model.config.use_pae and "curve_window" in batch:
@@ -272,19 +334,14 @@ def train_one_epoch(
 
             compute_start = time.perf_counter()
 
-            with torch.no_grad():
-                last_context_value = context[:, -1, 1]
-                target_value = target[:, 1]
-                value_distance = torch.abs(target_value - last_context_value)
-                confidence_targets = torch.exp(-value_distance * 5.0).unsqueeze(-1)
-
-            prediction, confidence = model(
-                context, prop_type, topo_features, bone_name_tokens, query_time,
+            predictions, confidences = model(
+                context, prop_type, topo_features, bone_name_tokens, query_times,
                 curve_window=curve_window,
             )
-            loss, metrics = compute_loss(
-                prediction, confidence, target, config.training.loss_weights,
-                confidence_targets, context,
+            loss, metrics = compute_multistep_loss(
+                predictions, confidences, target, valid_steps,
+                config.training.loss_weights, context,
+                config.training.step_decay,
             )
 
             optimizer.zero_grad()
@@ -336,25 +393,22 @@ def validate(
         prop_type = batch["property_type"].to(device, non_blocking=True)
         topo_features = batch["topology_features"].to(device, non_blocking=True)
         bone_name_tokens = batch["bone_name_tokens"].to(device, non_blocking=True)
-        query_time = batch["query_time"].to(device, non_blocking=True).squeeze(-1)
+        query_times = batch["query_times"].to(device, non_blocking=True)
         target = batch["target"].to(device, non_blocking=True)
+        valid_steps = batch["valid_steps"].to(device, non_blocking=True)
 
         curve_window = None
         if model.config.use_pae and "curve_window" in batch:
             curve_window = batch["curve_window"].to(device, non_blocking=True)
 
-        last_context_value = context[:, -1, 1]
-        target_value = target[:, 1]
-        value_distance = torch.abs(target_value - last_context_value)
-        confidence_targets = torch.exp(-value_distance * 5.0).unsqueeze(-1)
-
-        prediction, confidence = model(
-            context, prop_type, topo_features, bone_name_tokens, query_time,
+        predictions, confidences = model(
+            context, prop_type, topo_features, bone_name_tokens, query_times,
             curve_window=curve_window,
         )
-        _, metrics = compute_loss(
-            prediction, confidence, target, config.training.loss_weights,
-            confidence_targets, context,
+        _, metrics = compute_multistep_loss(
+            predictions, confidences, target, valid_steps,
+            config.training.loss_weights, context,
+            config.training.step_decay,
         )
 
         for key, val in metrics.items():

@@ -15,6 +15,7 @@ model:
   use_multi_resolution: true
   multi_res_branch_dim: 32
   use_phase_detection: true
+  max_steps: 3
 
 training:
   batch_size: 2048
@@ -24,6 +25,7 @@ training:
   warmup_epochs: 5
   gradient_clip: 1.0
   early_stopping_patience: 15
+  step_decay: [1.0, 0.8, 0.6]
   loss_weights:
     value: 1.0
     tangent: 0.5

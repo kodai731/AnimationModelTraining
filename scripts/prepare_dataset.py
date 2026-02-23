@@ -66,16 +66,21 @@ def process_single_bvh(
     filepath: Path,
     dataset_type: str,
     prep_log: PreparationLog,
+    max_steps: int = 1,
 ) -> list[CurveSample]:
     try:
         z_up = detect_z_up(dataset_type)
 
         prep_log.log("parse_bvh_start", file=filepath.name, dataset=dataset_type)
         motion = parse_bvh(filepath, z_up=z_up)
-        prep_log.log("parse_bvh_done", file=filepath.name, n_frames=motion.positions.shape[0], n_joints=len(motion.joint_names))
+        prep_log.log(
+            "parse_bvh_done", file=filepath.name,
+            n_frames=motion.positions.shape[0],
+            n_joints=len(motion.joint_names),
+        )
 
         prep_log.log("extract_samples_start", file=filepath.name)
-        samples = extract_curve_samples(motion)
+        samples = extract_curve_samples(motion, max_steps=max_steps)
         prep_log.log("extract_samples_done", file=filepath.name, n_samples=len(samples))
 
         del motion
@@ -109,15 +114,16 @@ def _assign_splits(n_files: int) -> dict[int, str]:
 def _samples_to_arrays(samples: list[CurveSample]) -> dict[str, np.ndarray]:
     return {
         "context_keyframes": np.stack([s.context_keyframes for s in samples]),
-        "target": np.stack([s.target_keyframe for s in samples]),
+        "target": np.stack([s.target_keyframes for s in samples]),
         "property_type": np.array([s.property_type for s in samples], dtype=np.int32),
         "topology_features": np.stack([s.topology_features for s in samples]),
         "bone_name_tokens": np.stack([s.bone_name_tokens for s in samples]).astype(np.int32),
-        "query_time": np.array([s.query_time for s in samples], dtype=np.float32),
+        "query_times": np.stack([s.query_times for s in samples]),
         "clip_duration": np.array([s.clip_duration for s in samples], dtype=np.float32),
         "joint_depth": np.array([s.joint_depth for s in samples], dtype=np.int32),
         "curve_mean": np.array([s.curve_mean for s in samples], dtype=np.float32),
         "curve_std": np.array([s.curve_std for s in samples], dtype=np.float32),
+        "valid_steps": np.array([s.valid_steps for s in samples], dtype=np.int32),
     }
 
 
@@ -151,6 +157,7 @@ def run_pipeline(
     output_dir: Path,
     limit: int | None,
     prep_log: PreparationLog,
+    max_steps: int = 1,
 ) -> None:
     files = collect_bvh_files(dataset, raw_dir)
     if limit:
@@ -171,7 +178,7 @@ def run_pipeline(
         groups = {name: f.create_group(name) for name in ("train", "val", "test")}
 
         for i, (filepath, ds_type) in enumerate(files):
-            samples = process_single_bvh(filepath, ds_type, prep_log)
+            samples = process_single_bvh(filepath, ds_type, prep_log, max_steps)
 
             if samples:
                 split = split_assignment[i]
@@ -217,13 +224,14 @@ def main() -> None:
     parser.add_argument("--raw-dir", type=Path, default=get_raw_data_dir())
     parser.add_argument("--output-dir", type=Path, default=get_processed_data_dir())
     parser.add_argument("--limit", type=int, default=None, help="Limit number of BVH files")
+    parser.add_argument("--max-steps", type=int, default=1, help="Number of prediction steps")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     prep_log = PreparationLog("prepare_curve")
     prep_log.log("main_started", dataset=args.dataset)
-    run_pipeline(args.dataset, args.raw_dir, args.output_dir, args.limit, prep_log)
+    run_pipeline(args.dataset, args.raw_dir, args.output_dir, args.limit, prep_log, args.max_steps)
     prep_log.log("main_finished")
 
 

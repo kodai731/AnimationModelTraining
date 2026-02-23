@@ -26,12 +26,14 @@ _FIELD_DTYPES: dict[str, torch.dtype] = {
     "property_type": torch.int64,
     "topology_features": torch.float32,
     "bone_name_tokens": torch.int64,
-    "query_time": torch.float32,
+    "query_times": torch.float32,
     "curve_window": torch.float32,
+    "valid_steps": torch.int64,
 }
 
 _OPTIONAL_FALLBACK_SHAPES: dict[str, tuple[int, ...]] = {
     "curve_window": (PAE_WINDOW_SIZE,),
+    "valid_steps": (),
 }
 
 _DTYPE_BYTE_SIZES: dict[torch.dtype, int] = {
@@ -173,21 +175,35 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
 
         for key, dtype in _FIELD_DTYPES.items():
             parts: list[torch.Tensor] = []
+            hdf5_key = key
             for file_idx, local_start, local_end in file_slices:
                 with h5py.File(self._paths[file_idx], "r") as f:
                     split_grp = cast("h5py.Group", f[self._split])
-                    if key not in split_grp and key in _OPTIONAL_FALLBACK_SHAPES:
+
+                    resolved_key = hdf5_key
+                    is_legacy_query_time = (
+                        hdf5_key == "query_times"
+                        and hdf5_key not in split_grp
+                        and "query_time" in split_grp
+                    )
+                    if is_legacy_query_time:
+                        resolved_key = "query_time"
+
+                    if resolved_key not in split_grp and key in _OPTIONAL_FALLBACK_SHAPES:
                         count = local_end - local_start
                         fallback_shape = (count,) + _OPTIONAL_FALLBACK_SHAPES[key]
                         parts.append(torch.zeros(fallback_shape, dtype=dtype))
                     else:
-                        ds = cast("h5py.Dataset", split_grp[key])
+                        ds = cast("h5py.Dataset", split_grp[resolved_key])
                         parts.append(torch.as_tensor(ds[local_start:local_end], dtype=dtype))
             self._cache[key] = torch.cat(parts)
             del parts
 
-        if self._cache["query_time"].ndim == 1:
-            self._cache["query_time"] = self._cache["query_time"].unsqueeze(-1)
+        if self._cache["query_times"].ndim == 1:
+            self._cache["query_times"] = self._cache["query_times"].unsqueeze(-1)
+
+        if self._cache["valid_steps"].ndim == 1 and self._cache["valid_steps"].sum() == 0:
+            self._cache["valid_steps"] = torch.ones_like(self._cache["valid_steps"])
 
         self._loaded_count = chunk_count
 
@@ -250,8 +266,9 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
             "property_type": self._cache["property_type"][index],
             "topology_features": self._cache["topology_features"][index],
             "bone_name_tokens": tokens,
-            "query_time": self._cache["query_time"][index],
+            "query_times": self._cache["query_times"][index],
             "curve_window": self._cache["curve_window"][index],
+            "valid_steps": self._cache["valid_steps"][index],
         }
 
     def reload_chunk(self, chunk_index: int | None = None) -> None:
@@ -272,12 +289,19 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
 def _compute_per_sample_bytes(grp: h5py.Group) -> int:
     total = 0
     for key, dtype in _FIELD_DTYPES.items():
-        if key not in grp and key in _OPTIONAL_FALLBACK_SHAPES:
-            sample_elements = math.prod(_OPTIONAL_FALLBACK_SHAPES[key])
-        else:
-            ds = cast("h5py.Dataset", grp[key])
+        resolved_key = key
+        if key == "query_times" and key not in grp and "query_time" in grp:
+            resolved_key = "query_time"
+
+        if resolved_key not in grp and key in _OPTIONAL_FALLBACK_SHAPES:
+            fallback = _OPTIONAL_FALLBACK_SHAPES[key]
+            sample_elements = math.prod(fallback) if fallback else 1
+        elif resolved_key in grp:
+            ds = cast("h5py.Dataset", grp[resolved_key])
             shape = cast("tuple[int, ...]", ds.shape)  # pyright: ignore[reportUnknownMemberType]
             sample_elements = math.prod(shape[1:]) if len(shape) > 1 else 1
+        else:
+            sample_elements = 1
         total += sample_elements * _DTYPE_BYTE_SIZES[dtype]
     return total
 

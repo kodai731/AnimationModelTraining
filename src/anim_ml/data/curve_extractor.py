@@ -21,16 +21,17 @@ PAE_WINDOW_SIZE = 64
 @dataclass
 class CurveSample:
     context_keyframes: np.ndarray
-    target_keyframe: np.ndarray
+    target_keyframes: np.ndarray
     property_type: int
     topology_features: np.ndarray
     bone_name_tokens: np.ndarray
-    query_time: float
+    query_times: np.ndarray
     clip_duration: float
     joint_depth: int
     curve_mean: float
     curve_std: float
     curve_window: np.ndarray
+    valid_steps: int
 
 
 CONTEXT_LENGTH = 8
@@ -46,6 +47,7 @@ def extract_curve_samples(
     motion: MotionData,
     parent_indices: list[int] | None = None,
     joint_names: list[str] | None = None,
+    max_steps: int = 1,
 ) -> list[CurveSample]:
     if parent_indices is None:
         parent_indices = motion.parent_indices
@@ -106,6 +108,7 @@ def extract_curve_samples(
                 scale=scale,
                 times=times,
                 normalized_values=normalized_values,
+                max_steps=max_steps,
             )
             samples.extend(channel_samples)
 
@@ -189,6 +192,22 @@ def _sample_curve_window(
     return (window_values - curve_mean) / curve_std
 
 
+def _encode_keyframe(
+    kf: BezierKeyframe,
+    time_scale: float,
+    curve_mean: float,
+    curve_std: float,
+) -> np.ndarray:
+    return np.array([
+        kf.time / time_scale,
+        (kf.value - curve_mean) / curve_std,
+        kf.tangent_in[0] / time_scale,
+        kf.tangent_in[1] / curve_std,
+        kf.tangent_out[0] / time_scale,
+        kf.tangent_out[1] / curve_std,
+    ], dtype=np.float32)
+
+
 def _generate_sliding_window_samples(
     bezier_keyframes: list[BezierKeyframe],
     property_type: int,
@@ -199,6 +218,7 @@ def _generate_sliding_window_samples(
     scale: float,
     times: np.ndarray,
     normalized_values: np.ndarray,
+    max_steps: int = 1,
 ) -> list[CurveSample]:
     if len(bezier_keyframes) < 2:
         return []
@@ -224,41 +244,41 @@ def _generate_sliding_window_samples(
 
         for i, kf in enumerate(context_kfs):
             row = offset + i
-            context_array[row, 0] = kf.time / time_scale
-            context_array[row, 1] = (kf.value - curve_mean) / curve_std
-            context_array[row, 2] = kf.tangent_in[0] / time_scale
-            context_array[row, 3] = kf.tangent_in[1] / curve_std
-            context_array[row, 4] = kf.tangent_out[0] / time_scale
-            context_array[row, 5] = kf.tangent_out[1] / curve_std
+            context_array[row] = _encode_keyframe(kf, time_scale, curve_mean, curve_std)
 
-        target_kf = bezier_keyframes[target_idx]
-        target_array = np.array([
-            target_kf.time / time_scale,
-            (target_kf.value - curve_mean) / curve_std,
-            target_kf.tangent_in[0] / time_scale,
-            target_kf.tangent_in[1] / curve_std,
-            target_kf.tangent_out[0] / time_scale,
-            target_kf.tangent_out[1] / curve_std,
-        ], dtype=np.float32)
+        target_array = np.zeros((max_steps, 6), dtype=np.float32)
+        query_times_array = np.zeros(max_steps, dtype=np.float32)
+        valid_steps = 0
 
+        for step in range(max_steps):
+            step_idx = target_idx + step
+            if step_idx >= len(bezier_keyframes):
+                break
+            step_kf = bezier_keyframes[step_idx]
+            target_array[step] = _encode_keyframe(step_kf, time_scale, curve_mean, curve_std)
+            query_times_array[step] = step_kf.time / time_scale
+            valid_steps += 1
+
+        last_valid_kf = bezier_keyframes[target_idx + valid_steps - 1]
         curve_window = _sample_curve_window(
             times, normalized_values,
-            context_kfs[0].time, target_kf.time,
+            context_kfs[0].time, last_valid_kf.time,
             curve_mean, curve_std,
         )
 
         samples.append(CurveSample(
             context_keyframes=context_array,
-            target_keyframe=target_array,
+            target_keyframes=target_array,
             property_type=property_type,
             topology_features=topology_features,
             bone_name_tokens=bone_name_tokens,
-            query_time=float(target_kf.time / time_scale),
+            query_times=query_times_array,
             clip_duration=clip_duration,
             joint_depth=joint_depth,
             curve_mean=curve_mean * scale,
             curve_std=curve_std * scale,
             curve_window=curve_window,
+            valid_steps=valid_steps,
         ))
 
     return samples
