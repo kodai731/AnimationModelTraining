@@ -7,7 +7,9 @@ from anim_ml.models.curve_copilot.model import (
     CurveCopilotConfig,
     CurveCopilotModel,
     GatingNetwork,
+    MultiResolutionEncoder,
     PeriodicTimeEncoder,
+    PhaseDetector,
     PropertyAdaptiveBlock,
     count_parameters,
 )
@@ -438,3 +440,148 @@ class TestPAEIntegration:
         prediction, confidence = model(**inputs)
         assert prediction.shape == (2, 6)
         assert confidence.shape == (2, 1)
+
+
+@pytest.mark.unit
+class TestEnhancedGating:
+    def test_compute_motion_state_shape(self) -> None:
+        config = CurveCopilotConfig(use_expert_mixing=True, enhanced_gating=True)
+        model = CurveCopilotModel(config)
+        motion_features = torch.randn(4, 8, 2)
+        state = model._compute_motion_state(motion_features)
+        assert state.shape == (4, 3)
+
+    def test_forward_pass(self) -> None:
+        config = CurveCopilotConfig(use_expert_mixing=True, enhanced_gating=True)
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input()
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)
+
+    def test_gate_weights_sum_to_one(self) -> None:
+        gating = GatingNetwork(
+            num_property_types=9, d_model=128, num_experts=3, enhanced_gating=True,
+        )
+        property_type = torch.randint(0, 9, (8,))
+        motion_state = torch.randn(8, 3)
+        weights = gating(property_type, motion_state)
+        sums = weights.sum(dim=-1)
+        assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
+
+    def test_all_parameters_receive_gradients(self) -> None:
+        config = CurveCopilotConfig(use_expert_mixing=True, enhanced_gating=True)
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input()
+        prediction, confidence = model(**inputs)
+        loss = prediction.sum() + confidence.sum()
+        loss.backward()
+
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert param.grad is not None, f"No gradient for {name}"
+                assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+
+
+@pytest.mark.unit
+class TestMultiResolution:
+    def test_encoder_output_shape(self) -> None:
+        encoder = MultiResolutionEncoder(64, 32, 128)
+        curve_window = torch.randn(4, 64)
+        out = encoder(curve_window)
+        assert out.shape == (4, 128)
+
+    def test_forward_with_curve_window(self) -> None:
+        config = CurveCopilotConfig(use_multi_resolution=True)
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input(include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)
+
+    def test_forward_without_curve_window(self) -> None:
+        config = CurveCopilotConfig(use_multi_resolution=True)
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input(include_curve_window=False)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)
+
+    def test_pae_and_multi_res_combined(self) -> None:
+        config = CurveCopilotConfig(
+            use_pae=True, use_multi_resolution=True,
+            periodic_time_encoding=True, use_expert_mixing=True,
+        )
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input(include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)
+
+
+@pytest.mark.unit
+class TestPhaseDetection:
+    def test_extract_phase_params(self) -> None:
+        detector = PhaseDetector(128)
+        curve_window = torch.randn(4, 64)
+        base_phase, period, amplitude = detector.extract_phase_params(curve_window)
+        assert base_phase.shape == (4,)
+        assert period.shape == (4,)
+        assert amplitude.shape == (4,)
+        assert (period > 0).all()
+
+    def test_forward_pass(self) -> None:
+        config = CurveCopilotConfig(use_phase_detection=True)
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input(include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)
+
+    def test_pae_and_phase_combined(self) -> None:
+        config = CurveCopilotConfig(
+            use_pae=True, use_phase_detection=True,
+            periodic_time_encoding=True, use_expert_mixing=True,
+        )
+        model = CurveCopilotModel(config)
+        inputs = _make_dummy_input(include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)
+
+
+@pytest.mark.unit
+class TestAllPhase2Features:
+    def _make_full_config(self) -> CurveCopilotConfig:
+        return CurveCopilotConfig(
+            periodic_time_encoding=True,
+            use_expert_mixing=True,
+            use_pae=True,
+            enhanced_gating=True,
+            use_multi_resolution=True,
+            use_phase_detection=True,
+        )
+
+    def test_forward_pass(self) -> None:
+        model = CurveCopilotModel(self._make_full_config())
+        inputs = _make_dummy_input(include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        assert prediction.shape == (2, 6)
+        assert confidence.shape == (2, 1)
+
+    def test_within_budget(self) -> None:
+        model = CurveCopilotModel(self._make_full_config())
+        params = count_parameters(model)
+        assert params <= 5_000_000, f"Parameter count {params} exceeds 5M budget"
+
+    def test_all_parameters_receive_gradients(self) -> None:
+        model = CurveCopilotModel(self._make_full_config())
+        inputs = _make_dummy_input(include_curve_window=True)
+        prediction, confidence = model(**inputs)
+        loss = prediction.sum() + confidence.sum()
+        loss.backward()
+
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert param.grad is not None, f"No gradient for {name}"
+                assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"

@@ -11,6 +11,10 @@ model:
   use_pae: true
   pae_window_size: 64
   pae_latent_channels: 5
+  enhanced_gating: true
+  use_multi_resolution: true
+  multi_res_branch_dim: 32
+  use_phase_detection: true
 
 training:
   batch_size: 2048

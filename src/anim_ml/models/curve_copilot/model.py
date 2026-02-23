@@ -31,6 +31,10 @@ class CurveCopilotConfig:
     use_pae: bool = False
     pae_window_size: int = 64
     pae_latent_channels: int = 5
+    enhanced_gating: bool = False
+    use_multi_resolution: bool = False
+    multi_res_branch_dim: int = 32
+    use_phase_detection: bool = False
 
 
 class PeriodicTimeEncoder(nn.Module):
@@ -96,15 +100,126 @@ class CausalTransformerBlock(nn.Module):
 
 class GatingNetwork(nn.Module):
     def __init__(
-        self, num_property_types: int, d_model: int, num_experts: int,
+        self,
+        num_property_types: int,
+        d_model: int,
+        num_experts: int,
+        enhanced_gating: bool = False,
     ) -> None:
         super().__init__()
         self.property_embedding = nn.Embedding(num_property_types, d_model)
-        self.gate_proj = nn.Linear(d_model, num_experts)
 
-    def forward(self, property_type: torch.Tensor) -> torch.Tensor:
+        self.motion_proj: nn.Linear | None = None
+        if enhanced_gating:
+            self.motion_proj = nn.Linear(3, d_model)
+            self.gate_proj: nn.Module = nn.Sequential(
+                nn.Linear(d_model, d_model // 2),
+                nn.ReLU(),
+                nn.Linear(d_model // 2, num_experts),
+            )
+        else:
+            self.gate_proj = nn.Linear(d_model, num_experts)
+
+    def forward(
+        self, property_type: torch.Tensor, motion_state: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         emb = self.property_embedding(property_type)
+        if self.motion_proj is not None and motion_state is not None:
+            emb = emb + self.motion_proj(motion_state)
         return torch.softmax(self.gate_proj(emb), dim=-1)
+
+
+class MultiResolutionEncoder(nn.Module):
+    def __init__(self, window_size: int, branch_dim: int, d_model: int) -> None:
+        super().__init__()
+        self.low_pool = nn.AvgPool1d(kernel_size=16, stride=16)
+        self.low_conv = nn.Conv1d(1, branch_dim, kernel_size=3, padding=1)
+        self.low_proj = nn.Linear(branch_dim, branch_dim)
+
+        self.mid_pool = nn.AvgPool1d(kernel_size=4, stride=4)
+        self.mid_conv = nn.Conv1d(1, branch_dim, kernel_size=3, padding=1)
+        self.mid_proj = nn.Linear(branch_dim, branch_dim)
+
+        self.high_conv = nn.Conv1d(1, branch_dim, kernel_size=3, padding=1)
+        self.high_proj = nn.Linear(branch_dim, branch_dim)
+
+        self.fusion = nn.Linear(branch_dim * 3, d_model)
+
+    def _encode_branch(
+        self, x: torch.Tensor, conv: nn.Conv1d, proj: nn.Linear,
+    ) -> torch.Tensor:
+        h = torch.relu(conv(x.unsqueeze(1)))
+        return proj(h.mean(dim=-1))
+
+    def forward(self, curve_window: torch.Tensor) -> torch.Tensor:
+        x_3d = curve_window.unsqueeze(1)
+
+        low = self._encode_branch(
+            self.low_pool(x_3d).squeeze(1), self.low_conv, self.low_proj,
+        )
+        mid = self._encode_branch(
+            self.mid_pool(x_3d).squeeze(1), self.mid_conv, self.mid_proj,
+        )
+        high = self._encode_branch(
+            curve_window[:, -16:], self.high_conv, self.high_proj,
+        )
+
+        return self.fusion(torch.cat([low, mid, high], dim=-1))
+
+
+class PhaseDetector(nn.Module):
+    def __init__(self, d_model: int) -> None:
+        super().__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=7, stride=2, padding=3),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+        )
+        self.phase_head = nn.Linear(512, 2)
+        self.period_head = nn.Linear(512, 1)
+        self.amplitude_head = nn.Linear(512, 1)
+        self.context_proj = nn.Linear(4, d_model)
+        self.query_proj = nn.Linear(4, d_model)
+
+    def extract_phase_params(
+        self, curve_window: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        h = self.conv_layers(curve_window.unsqueeze(1)).flatten(1)
+
+        phase_xy = self.phase_head(h)
+        base_phase = torch.atan2(phase_xy[:, 0], phase_xy[:, 1])
+
+        period = torch.nn.functional.softplus(self.period_head(h).squeeze(-1)) + 0.01
+        amplitude = self.amplitude_head(h).squeeze(-1)
+
+        return base_phase, period, amplitude
+
+    def compute_context_conditioning(
+        self,
+        base_phase: torch.Tensor,
+        period: torch.Tensor,
+        amplitude: torch.Tensor,
+    ) -> torch.Tensor:
+        features = torch.stack([
+            torch.sin(base_phase), torch.cos(base_phase), amplitude, period,
+        ], dim=-1)
+        return self.context_proj(features)
+
+    def compute_query_phase_encoding(
+        self,
+        query_time: torch.Tensor,
+        base_phase: torch.Tensor,
+        period: torch.Tensor,
+        amplitude: torch.Tensor,
+    ) -> torch.Tensor:
+        relative_phase = 2.0 * torch.pi * (query_time / period) + base_phase
+        features = torch.stack([
+            torch.sin(relative_phase), torch.cos(relative_phase), amplitude, period,
+        ], dim=-1)
+        return self.query_proj(features)
 
 
 class PropertyAdaptiveBlock(nn.Module):
@@ -163,6 +278,7 @@ class CurveCopilotModel(nn.Module):
         if config.use_expert_mixing:
             self.gating = GatingNetwork(
                 config.num_property_types, config.d_model, config.num_experts,
+                config.enhanced_gating,
             )
             self.blocks = nn.ModuleList([
                 PropertyAdaptiveBlock(
@@ -190,6 +306,16 @@ class CurveCopilotModel(nn.Module):
             self.pae_encoder = PAEEncoder(pae_cfg)
             self.phase_projection = nn.Linear(pae_cfg.feature_dim, config.d_model)
 
+        self.multi_res_encoder: MultiResolutionEncoder | None = None
+        if config.use_multi_resolution:
+            self.multi_res_encoder = MultiResolutionEncoder(
+                config.pae_window_size, config.multi_res_branch_dim, config.d_model,
+            )
+
+        self.phase_detector: PhaseDetector | None = None
+        if config.use_phase_detection:
+            self.phase_detector = PhaseDetector(config.d_model)
+
         self.output_norm = nn.LayerNorm(config.d_model)
         self.prediction_head = nn.Linear(config.d_model, 6)
         self.confidence_head = nn.Linear(config.d_model, 1)
@@ -211,6 +337,18 @@ class CurveCopilotModel(nn.Module):
         acceleration[:, 2:] = velocity[:, 2:] - velocity[:, 1:-1]
 
         return torch.stack([velocity, acceleration], dim=-1)
+
+    def _compute_motion_state(self, motion_features: torch.Tensor) -> torch.Tensor:
+        velocity = motion_features[:, :, 0]
+        acceleration = motion_features[:, :, 1]
+
+        velocity_magnitude = velocity.abs().mean(dim=1)
+        acceleration_magnitude = acceleration.abs().mean(dim=1)
+        velocity_trend = velocity[:, -1]
+
+        return torch.stack(
+            [velocity_magnitude, acceleration_magnitude, velocity_trend], dim=-1,
+        )
 
     def forward(
         self,
@@ -246,6 +384,23 @@ class CurveCopilotModel(nn.Module):
             phase_embed = self.phase_projection(phase_features).unsqueeze(1)  # type: ignore[union-attr]
             condition = condition + phase_embed
 
+        if self.multi_res_encoder is not None and curve_window is not None:
+            multi_res_embed = self.multi_res_encoder(curve_window).unsqueeze(1)
+            condition = condition + multi_res_embed
+
+        phase_query_embed = None
+        if self.phase_detector is not None and curve_window is not None:
+            base_phase, period, amplitude = self.phase_detector.extract_phase_params(
+                curve_window,
+            )
+            phase_context = self.phase_detector.compute_context_conditioning(
+                base_phase, period, amplitude,
+            ).unsqueeze(1)
+            condition = condition + phase_context
+            phase_query_embed = self.phase_detector.compute_query_phase_encoding(
+                query_time, base_phase, period, amplitude,
+            )
+
         kf_positions: torch.Tensor = self.kf_positions[:seq_len]  # type: ignore[assignment]
         kf_embed = kf_embed + condition + self.positional_embedding(kf_positions).unsqueeze(0)
 
@@ -260,7 +415,10 @@ class CurveCopilotModel(nn.Module):
             self.query_time_projection(query_time_input)
             + condition.squeeze(1)
             + self.positional_embedding(query_position)
-        ).unsqueeze(1)
+        )
+        if phase_query_embed is not None:
+            query_token = query_token + phase_query_embed
+        query_token = query_token.unsqueeze(1)
 
         x = torch.cat([kf_embed, query_token], dim=1)
 
@@ -268,7 +426,12 @@ class CurveCopilotModel(nn.Module):
         mask = causal_mask[:total_len, :total_len]
 
         if self.gating is not None:
-            gate_weights = self.gating(property_type)
+            motion_state = (
+                self._compute_motion_state(motion_features)
+                if self.config.enhanced_gating
+                else None
+            )
+            gate_weights = self.gating(property_type, motion_state)
             for block in self.blocks:
                 x = block(x, mask, gate_weights)
         else:
