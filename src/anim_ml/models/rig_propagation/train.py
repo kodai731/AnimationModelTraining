@@ -6,8 +6,10 @@ import math
 import random
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -17,6 +19,12 @@ from torch.utils.data import DataLoader
 from anim_ml.data.rig_dataset import RigPropagationDataset
 from anim_ml.models.rig_propagation.model import RigPropagationConfig, RigPropagationModel
 from anim_ml.paths import resolve_data_path
+from anim_ml.utils.checkpoint import (
+    CheckpointState,
+    load_training_checkpoint,
+    restore_checkpoint_state,
+    save_training_checkpoint,
+)
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
 from anim_ml.utils.memory_budget import create_memory_budget
 from anim_ml.utils.optimizer import DmlAdamW
@@ -163,7 +171,8 @@ def train_one_epoch(
     epoch: int,
     pin_memory: bool = False,
     batch_timing: BatchTimingLog | None = None,
-) -> dict[str, float]:
+    global_step: int = 0,
+) -> tuple[dict[str, float], int]:
     model.train()
     total_loss = 0.0
     num_batches = 0
@@ -241,7 +250,7 @@ def train_one_epoch(
     if batch_timing:
         batch_timing.end_epoch()
 
-    return {"loss/train": total_loss / max(num_batches, 1)}
+    return {"loss/train": total_loss / max(num_batches, 1)}, global_step + epoch_step
 
 
 @torch.no_grad()  # pyright: ignore[reportUntypedFunctionDecorator]
@@ -282,45 +291,42 @@ def validate(
     return {"loss/val": total_loss / max(num_batches, 1)}
 
 
+def _build_model_config_dict(model: RigPropagationModel) -> dict[str, Any]:
+    return {
+        "max_joints": model.config.max_joints,
+        "max_edges": model.config.max_edges,
+        "node_feature_dim": model.config.node_feature_dim,
+        "edge_feature_dim": model.config.edge_feature_dim,
+        "hidden_dim": model.config.hidden_dim,
+        "ffn_dim": model.config.ffn_dim,
+        "num_message_passing_layers": model.config.num_message_passing_layers,
+        "input_feature_dim": model.config.input_feature_dim,
+        "dropout": model.config.dropout,
+        "vocab_size": model.config.vocab_size,
+        "token_length": model.config.token_length,
+        "char_embed_dim": model.config.char_embed_dim,
+        "conv_channels": model.config.conv_channels,
+        "bone_context_dim": model.config.bone_context_dim,
+        "topology_dim": model.config.topology_dim,
+    }
+
+
 def save_checkpoint(
     model: RigPropagationModel,
     optimizer: DmlAdamW,
     scheduler: torch.optim.lr_scheduler.LambdaLR,
-    epoch: int,
+    state: CheckpointState,
     metrics: dict[str, float],
     path: str | Path,
-    best_val_loss: float = float("inf"),
 ) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save({  # pyright: ignore[reportUnknownMemberType]
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
-        "metrics": metrics,
-        "best_val_loss": best_val_loss,
-        "config": {
-            "max_joints": model.config.max_joints,
-            "max_edges": model.config.max_edges,
-            "node_feature_dim": model.config.node_feature_dim,
-            "edge_feature_dim": model.config.edge_feature_dim,
-            "hidden_dim": model.config.hidden_dim,
-            "ffn_dim": model.config.ffn_dim,
-            "num_message_passing_layers": model.config.num_message_passing_layers,
-            "input_feature_dim": model.config.input_feature_dim,
-            "dropout": model.config.dropout,
-            "vocab_size": model.config.vocab_size,
-            "token_length": model.config.token_length,
-            "char_embed_dim": model.config.char_embed_dim,
-            "conv_channels": model.config.conv_channels,
-            "bone_context_dim": model.config.bone_context_dim,
-            "topology_dim": model.config.topology_dim,
-        },
-    }, path)
+    save_training_checkpoint(
+        model, optimizer, scheduler, state, metrics,
+        _build_model_config_dict(model), path,
+    )
 
 
 def load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
-    return torch.load(path, map_location=device, weights_only=False)  # type: ignore[no-any-return]
+    return load_training_checkpoint(path)
 
 
 def train(
@@ -399,15 +405,27 @@ def train(
     patience = config.training.early_stopping_patience
     all_metrics: dict[str, float] = {}
     start_epoch = 1
+    global_step = 0
 
     if resume_path is not None:
         ckpt = load_checkpoint(resume_path, device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        start_epoch = ckpt["epoch"] + 1
-        best_val_loss = ckpt.get("best_val_loss", float("inf"))
-        print(f"Resumed from epoch {ckpt['epoch']} (best_val_loss={best_val_loss:.4f})", flush=True)
+
+        ckpt_state = restore_checkpoint_state(ckpt)
+        global_step = ckpt_state.global_step
+        best_val_loss = ckpt_state.best_val_loss
+        epochs_without_improvement = ckpt_state.epochs_without_improvement
+
+        start_epoch = ckpt_state.epoch if ckpt_state.is_mid_epoch else ckpt_state.epoch + 1
+
+        print(
+            f"Resumed from epoch {ckpt_state.epoch}"
+            f" (best_val_loss={best_val_loss:.4f}"
+            f", mid_epoch={ckpt_state.is_mid_epoch})",
+            flush=True,
+        )
 
     epoch = start_epoch - 1
 
@@ -416,9 +434,10 @@ def train(
             print(f"Epoch {epoch}/{config.training.epochs}", flush=True)
 
             with TimingLog.measure() as train_time:
-                train_metrics = train_one_epoch(
+                train_metrics, global_step = train_one_epoch(
                     model, train_dataset, optimizer, scheduler,
                     config, device, epoch, pin_memory, batch_timing,
+                    global_step,
                 )
 
             train_dataset.evict_cache()
@@ -448,8 +467,10 @@ def train(
                 epochs_without_improvement = 0
                 with TimingLog.measure() as ckpt_time:
                     save_checkpoint(
-                        model, optimizer, scheduler, epoch, all_metrics,
-                        checkpoint_dir / "best.pt", best_val_loss,
+                        model, optimizer, scheduler,
+                        CheckpointState(epoch, global_step, False,
+                                        best_val_loss, epochs_without_improvement),
+                        all_metrics, checkpoint_dir / "best.pt",
                     )
                 checkpoint_time_sec += ckpt_time["elapsed"]
             else:
@@ -458,8 +479,10 @@ def train(
             if epoch % config.output.save_every_epochs == 0:
                 with TimingLog.measure() as ckpt_time:
                     save_checkpoint(
-                        model, optimizer, scheduler, epoch, all_metrics,
-                        checkpoint_dir / f"epoch_{epoch}.pt", best_val_loss,
+                        model, optimizer, scheduler,
+                        CheckpointState(epoch, global_step, False,
+                                        best_val_loss, epochs_without_improvement),
+                        all_metrics, checkpoint_dir / f"epoch_{epoch}.pt",
                     )
                 checkpoint_time_sec += ckpt_time["elapsed"]
 
@@ -489,13 +512,24 @@ def train(
 
     except KeyboardInterrupt:
         print(f"\nTraining interrupted at epoch {epoch}.", flush=True)
+        if epoch > 0:
+            save_checkpoint(
+                model, optimizer, scheduler,
+                CheckpointState(epoch, global_step, True,
+                                best_val_loss, epochs_without_improvement),
+                all_metrics, checkpoint_dir / "last.pt",
+            )
+            print(f"Saved mid-epoch last.pt (epoch {epoch}).", flush=True)
 
-    if epoch > 0:
-        save_checkpoint(
-            model, optimizer, scheduler, epoch, all_metrics,
-            checkpoint_dir / "last.pt", best_val_loss,
-        )
-        print(f"Saved last.pt (epoch {epoch}).", flush=True)
+    else:
+        if epoch > 0:
+            save_checkpoint(
+                model, optimizer, scheduler,
+                CheckpointState(epoch, global_step, False,
+                                best_val_loss, epochs_without_improvement),
+                all_metrics, checkpoint_dir / "last.pt",
+            )
+            print(f"Saved last.pt (epoch {epoch}).", flush=True)
 
     if best_val_loss < float("inf"):
         print(f"Best val loss: {best_val_loss:.4f} (best.pt)", flush=True)

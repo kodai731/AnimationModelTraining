@@ -6,8 +6,10 @@ import math
 import random
 import time
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -17,6 +19,12 @@ from torch.utils.data import DataLoader
 from anim_ml.data.curve_dataset import CurveCopilotDataset
 from anim_ml.models.curve_copilot.model import CurveCopilotConfig, CurveCopilotModel
 from anim_ml.paths import resolve_data_path
+from anim_ml.utils.checkpoint import (
+    CheckpointState,
+    load_training_checkpoint,
+    restore_checkpoint_state,
+    save_training_checkpoint,
+)
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
 from anim_ml.utils.memory_budget import create_memory_budget
 from anim_ml.utils.optimizer import DmlAdamW
@@ -287,7 +295,8 @@ def train_one_epoch(
     epoch: int,
     pin_memory: bool = False,
     batch_timing: BatchTimingLog | None = None,
-) -> dict[str, float]:
+    global_step: int = 0,
+) -> tuple[dict[str, float], int]:
     model.train()
     accumulated: dict[str, float] = {}
     num_batches = 0
@@ -374,7 +383,7 @@ def train_one_epoch(
                     "confidence", "smoothness", "frequency")
     for key in default_keys:
         result.setdefault(f"train/{key}", 0.0)
-    return result
+    return result, global_step + epoch_step
 
 
 @torch.no_grad()  # pyright: ignore[reportUntypedFunctionDecorator]
@@ -428,27 +437,18 @@ def save_checkpoint(
     model: CurveCopilotModel,
     optimizer: DmlAdamW,
     scheduler: torch.optim.lr_scheduler.LambdaLR,
-    epoch: int,
+    state: CheckpointState,
     metrics: dict[str, float],
     path: str | Path,
-    best_val_loss: float = float("inf"),
-    epochs_without_improvement: int = 0,
 ) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save({  # pyright: ignore[reportUnknownMemberType]
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
-        "metrics": metrics,
-        "best_val_loss": best_val_loss,
-        "epochs_without_improvement": epochs_without_improvement,
-        "config": asdict(model.config),
-    }, path)
+    save_training_checkpoint(
+        model, optimizer, scheduler, state, metrics,
+        asdict(model.config), path,
+    )
 
 
 def load_checkpoint(path: str | Path, device: torch.device) -> dict[str, Any]:
-    return torch.load(path, map_location="cpu", weights_only=False)  # type: ignore[no-any-return]
+    return load_training_checkpoint(path)
 
 
 def _migrate_mha_keys(state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -550,16 +550,27 @@ def train(
     patience = config.training.early_stopping_patience
     all_metrics: dict[str, float] = {}
     start_epoch = 1
+    global_step = 0
 
     if resume_path is not None:
         ckpt = load_checkpoint(resolve_data_path(resume_path), device)
         model.load_state_dict(_migrate_mha_keys(ckpt["model_state_dict"]), strict=False)
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        start_epoch = ckpt["epoch"] + 1
-        best_val_loss = ckpt.get("best_val_loss", float("inf"))
-        epochs_without_improvement = ckpt.get("epochs_without_improvement", 0)
-        print(f"Resumed from epoch {ckpt['epoch']} (best_val_loss={best_val_loss:.4f})", flush=True)
+
+        ckpt_state = restore_checkpoint_state(ckpt)
+        global_step = ckpt_state.global_step
+        best_val_loss = ckpt_state.best_val_loss
+        epochs_without_improvement = ckpt_state.epochs_without_improvement
+
+        start_epoch = ckpt_state.epoch if ckpt_state.is_mid_epoch else ckpt_state.epoch + 1
+
+        print(
+            f"Resumed from epoch {ckpt_state.epoch}"
+            f" (best_val_loss={best_val_loss:.4f}"
+            f", mid_epoch={ckpt_state.is_mid_epoch})",
+            flush=True,
+        )
 
     epoch = start_epoch - 1
 
@@ -568,9 +579,10 @@ def train(
             print(f"Epoch {epoch}/{config.training.epochs}", flush=True)
 
             with TimingLog.measure() as train_time:
-                train_metrics = train_one_epoch(
+                train_metrics, global_step = train_one_epoch(
                     model, train_dataset, optimizer, scheduler,
                     config, device, epoch, pin_memory, batch_timing,
+                    global_step,
                 )
 
             train_dataset.evict_cache()
@@ -610,9 +622,10 @@ def train(
                 epochs_without_improvement = 0
                 with TimingLog.measure() as ckpt_time:
                     save_checkpoint(
-                        model, optimizer, scheduler, epoch, all_metrics,
-                        checkpoint_dir / "best.pt", best_val_loss,
-                        epochs_without_improvement,
+                        model, optimizer, scheduler,
+                        CheckpointState(epoch, global_step, False,
+                                        best_val_loss, epochs_without_improvement),
+                        all_metrics, checkpoint_dir / "best.pt",
                     )
                 checkpoint_time_sec += ckpt_time["elapsed"]
             else:
@@ -621,9 +634,10 @@ def train(
             if epoch % config.output.save_every_epochs == 0:
                 with TimingLog.measure() as ckpt_time:
                     save_checkpoint(
-                        model, optimizer, scheduler, epoch, all_metrics,
-                        checkpoint_dir / f"epoch_{epoch}.pt", best_val_loss,
-                        epochs_without_improvement,
+                        model, optimizer, scheduler,
+                        CheckpointState(epoch, global_step, False,
+                                        best_val_loss, epochs_without_improvement),
+                        all_metrics, checkpoint_dir / f"epoch_{epoch}.pt",
                     )
                 checkpoint_time_sec += ckpt_time["elapsed"]
 
@@ -665,14 +679,24 @@ def train(
 
     except KeyboardInterrupt:
         print(f"\nTraining interrupted at epoch {epoch}.", flush=True)
+        if epoch > 0:
+            save_checkpoint(
+                model, optimizer, scheduler,
+                CheckpointState(epoch, global_step, True,
+                                best_val_loss, epochs_without_improvement),
+                all_metrics, checkpoint_dir / "last.pt",
+            )
+            print(f"Saved mid-epoch last.pt (epoch {epoch}).", flush=True)
 
-    if epoch > 0:
-        save_checkpoint(
-            model, optimizer, scheduler, epoch, all_metrics,
-            checkpoint_dir / "last.pt", best_val_loss,
-            epochs_without_improvement,
-        )
-        print(f"Saved last.pt (epoch {epoch}).", flush=True)
+    else:
+        if epoch > 0:
+            save_checkpoint(
+                model, optimizer, scheduler,
+                CheckpointState(epoch, global_step, False,
+                                best_val_loss, epochs_without_improvement),
+                all_metrics, checkpoint_dir / "last.pt",
+            )
+            print(f"Saved last.pt (epoch {epoch}).", flush=True)
 
     if best_val_loss < float("inf"):
         print(f"Best val loss: {best_val_loss:.4f} (best.pt)", flush=True)
