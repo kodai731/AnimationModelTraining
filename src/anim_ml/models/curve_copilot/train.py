@@ -31,6 +31,7 @@ class LossWeights:
     interpolation: float = 0.3
     confidence: float = 0.2
     smoothness: float = 0.1
+    frequency: float = 0.05
 
 
 @dataclass
@@ -91,6 +92,33 @@ def load_config(config_path: str | Path) -> TrainConfig:
     )
 
 
+def compute_frequency_loss(
+    prediction_value: torch.Tensor,
+    target_value: torch.Tensor,
+    context: torch.Tensor,
+) -> torch.Tensor:
+    context_values = context[:, :, 1]
+
+    pred_sequence = torch.cat([context_values, prediction_value.unsqueeze(1)], dim=1)
+    target_sequence = torch.cat([context_values, target_value.unsqueeze(1)], dim=1)
+
+    pred_spectrum = cast(
+        "torch.Tensor",
+        torch.fft.rfft(pred_sequence, dim=1).abs(),  # pyright: ignore[reportUnknownMemberType]
+    )
+    target_spectrum = cast(
+        "torch.Tensor",
+        torch.fft.rfft(target_sequence, dim=1).abs(),  # pyright: ignore[reportUnknownMemberType]
+    )
+
+    num_freqs: int = pred_spectrum.shape[1]
+    freq_weights = torch.exp(
+        -0.5 * torch.arange(num_freqs, dtype=torch.float32, device=context.device),
+    )
+
+    return ((pred_spectrum - target_spectrum).pow(2) * freq_weights.unsqueeze(0)).mean()
+
+
 def compute_loss(
     prediction: torch.Tensor,
     confidence: torch.Tensor,
@@ -123,12 +151,19 @@ def compute_loss(
         implied_acceleration = predicted_velocity - context_velocity
         smoothness_loss = implied_acceleration.pow(2).mean()
 
+    frequency_loss = torch.tensor(0.0, device=prediction.device)
+    if context is not None and context.shape[1] >= 2:
+        frequency_loss = compute_frequency_loss(
+            prediction[:, 0], target[:, 1], context,
+        )
+
     total = (
         weights.value * value_loss
         + weights.tangent * tangent_loss
         + weights.interpolation * interp_loss
         + weights.confidence * confidence_loss
         + weights.smoothness * smoothness_loss
+        + weights.frequency * frequency_loss
     )
 
     metrics = {
@@ -138,6 +173,7 @@ def compute_loss(
         "loss/interpolation": interp_loss.item(),
         "loss/confidence": confidence_loss.item(),
         "loss/smoothness": smoothness_loss.item(),
+        "loss/frequency": frequency_loss.item(),
     }
     return total, metrics
 
@@ -277,7 +313,9 @@ def train_one_epoch(
 
     n = max(num_batches, 1)
     result = {f"train/{k.removeprefix('loss/')}": v / n for k, v in accumulated.items()}
-    for key in ("total", "value", "tangent", "interpolation", "confidence", "smoothness"):
+    default_keys = ("total", "value", "tangent", "interpolation",
+                    "confidence", "smoothness", "frequency")
+    for key in default_keys:
         result.setdefault(f"train/{key}", 0.0)
     return result
 
@@ -325,7 +363,9 @@ def validate(
 
     n = max(num_batches, 1)
     result = {f"val/{k.removeprefix('loss/')}": v / n for k, v in accumulated.items()}
-    for key in ("total", "value", "tangent", "interpolation", "confidence", "smoothness"):
+    default_keys = ("total", "value", "tangent", "interpolation",
+                    "confidence", "smoothness", "frequency")
+    for key in default_keys:
         result.setdefault(f"val/{key}", 0.0)
     return result
 
@@ -504,7 +544,8 @@ def train(
                 f" t={val_metrics['val/tangent']:.4f}"
                 f" i={val_metrics['val/interpolation']:.4f}"
                 f" c={val_metrics['val/confidence']:.4f}"
-                f" s={val_metrics['val/smoothness']:.4f})",
+                f" s={val_metrics['val/smoothness']:.4f}"
+                f" f={val_metrics['val/frequency']:.4f})",
                 flush=True,
             )
 
@@ -542,6 +583,7 @@ def train(
                     ("interp", f"{phase}/interpolation"),
                     ("confidence", f"{phase}/confidence"),
                     ("smoothness", f"{phase}/smoothness"),
+                    ("freq", f"{phase}/frequency"),
                 ]
             }
             timing_log.write_epoch(epoch, {

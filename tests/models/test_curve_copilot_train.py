@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import gc
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -18,6 +17,7 @@ from anim_ml.models.curve_copilot.train import (
     LossWeights,
     TrainConfig,
     TrainingConfig,
+    compute_frequency_loss,
     compute_loss,
     create_optimizer_and_scheduler,
     load_checkpoint,
@@ -119,6 +119,7 @@ class TestComputeLoss:
         assert "loss/value" in metrics
         assert "loss/tangent" in metrics
         assert "loss/smoothness" in metrics
+        assert "loss/frequency" in metrics
 
     def test_zero_loss_for_perfect_prediction(self) -> None:
         target = torch.tensor([[0.5, 1.0, 0.1, 0.2, 0.3, 0.4]])
@@ -275,6 +276,7 @@ class TestConfigLoading:
         assert config.training.batch_size == 2048
         assert config.training.learning_rate == 2.83e-4
         assert config.training.loss_weights.value == 1.0
+        assert config.training.loss_weights.frequency == 0.05
         assert config.data.val_split == "val"
         assert config.output.checkpoint_dir == "runs/curve_copilot"
         assert config.model.use_expert_mixing is True
@@ -321,7 +323,9 @@ class TestMemoryCleanupPreservesState:
         assert scheduler_lr_before == scheduler_lr_after
 
         optimizer_state_after = optimizer.state_dict()
-        assert len(optimizer_state_before["param_groups"]) == len(optimizer_state_after["param_groups"])
+        before_groups = len(optimizer_state_before["param_groups"])
+        after_groups = len(optimizer_state_after["param_groups"])
+        assert before_groups == after_groups
 
         dataset.close()
 
@@ -390,6 +394,62 @@ class TestMemoryCleanupPreservesState:
         assert (checkpoint_dir / "last.pt").exists()
         loaded = load_checkpoint(checkpoint_dir / "last.pt", torch.device("cpu"))
         assert loaded["epoch"] == 3
+
+
+@pytest.mark.unit
+class TestFrequencyLoss:
+    def test_returns_scalar(self) -> None:
+        prediction_value = torch.randn(4)
+        target_value = torch.randn(4)
+        context = torch.randn(4, 8, 6)
+
+        loss = compute_frequency_loss(prediction_value, target_value, context)
+
+        assert loss.shape == ()
+        assert loss.item() >= 0.0
+
+    def test_zero_for_identical(self) -> None:
+        context = torch.randn(4, 8, 6)
+        value = torch.randn(4)
+
+        loss = compute_frequency_loss(value, value, context)
+
+        assert loss.item() < 1e-6
+
+    def test_differentiable(self) -> None:
+        prediction_value = torch.randn(4, requires_grad=True)
+        target_value = torch.randn(4)
+        context = torch.randn(4, 8, 6)
+
+        loss = compute_frequency_loss(prediction_value, target_value, context)
+        loss.backward()
+
+        assert prediction_value.grad is not None
+        assert prediction_value.grad.shape == prediction_value.shape
+
+    def test_short_context(self) -> None:
+        prediction_value = torch.randn(4)
+        target_value = torch.randn(4)
+        context = torch.randn(4, 2, 6)
+
+        loss = compute_frequency_loss(prediction_value, target_value, context)
+
+        assert loss.shape == ()
+
+    def test_low_freq_weighted_more(self) -> None:
+        context = torch.zeros(8, 6, 6)
+        context[:, :, 1] = torch.linspace(0, 1, 6).unsqueeze(0).expand(8, -1)
+
+        smooth_pred = context[:, -1, 1] + 0.2
+        noisy_pred = context[:, -1, 1] + 0.2
+        noisy_pred[::2] += 0.5
+
+        target = context[:, -1, 1] + 0.2
+
+        smooth_loss = compute_frequency_loss(smooth_pred, target, context)
+        noisy_loss = compute_frequency_loss(noisy_pred, target, context)
+
+        assert smooth_loss.item() <= noisy_loss.item()
 
 
 @pytest.mark.unit

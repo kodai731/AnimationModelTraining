@@ -30,6 +30,7 @@ training:
     interpolation: 0.3
     confidence: 0.2
     smoothness: 0.1
+    frequency: 0.05
 
 data:
   train_files:
