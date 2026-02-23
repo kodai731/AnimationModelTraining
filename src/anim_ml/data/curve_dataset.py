@@ -140,7 +140,8 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
 
         chunk_size = self._total_count
         if effective_budget > 0 and self._per_sample_bytes > 0 and self._total_count > 0:
-            budget_samples = effective_budget // self._per_sample_bytes
+            usable_budget = int(effective_budget * 0.85)
+            budget_samples = usable_budget // self._per_sample_bytes
             chunk_size = max(min(budget_samples, self._total_count), 1)
 
         self._chunk_size = chunk_size
@@ -157,14 +158,13 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
 
     def _load_current_chunk(self) -> None:
         if self._total_count == 0 or self._chunk_size == 0:
+            self._cache.clear()
             self._loaded_count = 0
             return
 
         samples_before = self._chunk_index * self._chunk_size
         chunk_count = min(self._chunk_size, self._total_count - samples_before)
         chunk_start = (self._epoch_offset + samples_before) % self._total_count
-
-        self._cache.clear()
 
         tail = self._total_count - chunk_start
         if chunk_count <= tail:
@@ -174,6 +174,8 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
             file_slices += self._collect_file_slices(0, chunk_count - tail)
 
         for key, dtype in _FIELD_DTYPES.items():
+            self._cache.pop(key, None)
+
             parts: list[torch.Tensor] = []
             hdf5_key = key
             for file_idx, local_start, local_end in file_slices:
@@ -196,6 +198,7 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
                     else:
                         ds = cast("h5py.Dataset", split_grp[resolved_key])
                         parts.append(torch.as_tensor(ds[local_start:local_end], dtype=dtype))
+
             self._cache[key] = torch.cat(parts)
             del parts
 

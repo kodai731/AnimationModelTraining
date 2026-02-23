@@ -4,7 +4,9 @@ import argparse
 import gc
 import math
 import random
+import sys
 import time
+import traceback
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -313,6 +315,7 @@ def train_one_epoch(
 
     for chunk_idx in chunk_order:
         if num_chunks > 1:
+            gc.collect()
             train_dataset.reload_chunk(chunk_idx)
 
         loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
@@ -586,12 +589,14 @@ def train(
                 )
 
             train_dataset.evict_cache()
+            gc.collect()
             val_dataset.reload_cache()
 
             with TimingLog.measure() as val_time:
                 val_metrics = validate(model, val_loader, config, device)
 
             val_dataset.evict_cache()
+            gc.collect()
 
             tier_change = budget.refresh()
             if tier_change:
@@ -717,7 +722,11 @@ def main() -> None:
     prep_log.log("config_loaded", num_train_files=len(config.data.train_files),
                  num_workers=config.data.num_workers, batch_size=config.training.batch_size)
 
-    train(config, prep_log, resume_path=args.resume, device_override=args.device)
+    try:
+        train(config, prep_log, resume_path=args.resume, device_override=args.device)
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
