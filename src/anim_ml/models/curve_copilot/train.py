@@ -181,7 +181,7 @@ def train_one_epoch(
     batch_timing: BatchTimingLog | None = None,
 ) -> dict[str, float]:
     model.train()
-    total_loss = 0.0
+    accumulated: dict[str, float] = {}
     num_batches = 0
 
     if batch_timing:
@@ -250,19 +250,24 @@ def train_one_epoch(
                 batch_timing.record_step(epoch_step, data_wait, compute_elapsed)
                 batch_timing.mark_data_start()
 
-            total_loss += metrics["loss/total"]
+            for key, val in metrics.items():
+                accumulated[key] = accumulated.get(key, 0.0) + val
             num_batches += 1
             epoch_step += 1
 
             if epoch_step % config.output.log_every_steps == 0:
-                avg = total_loss / num_batches
+                avg = accumulated["loss/total"] / num_batches
                 chunk_info = f" [chunk {chunk_idx + 1}/{num_chunks}]" if num_chunks > 1 else ""
                 print(f"  epoch {epoch} step {epoch_step}{chunk_info}: loss={avg:.4f}", flush=True)
 
     if batch_timing:
         batch_timing.end_epoch()
 
-    return {"loss/train": total_loss / max(num_batches, 1)}
+    n = max(num_batches, 1)
+    result = {f"train/{k.removeprefix('loss/')}": v / n for k, v in accumulated.items()}
+    for key in ("total", "value", "tangent", "interpolation", "confidence"):
+        result.setdefault(f"train/{key}", 0.0)
+    return result
 
 
 @torch.no_grad()  # pyright: ignore[reportUntypedFunctionDecorator]
@@ -273,7 +278,7 @@ def validate(
     device: torch.device,
 ) -> dict[str, float]:
     model.eval()
-    total_loss = 0.0
+    accumulated: dict[str, float] = {}
     num_batches = 0
 
     for batch in dataloader:
@@ -301,10 +306,15 @@ def validate(
             prediction, confidence, target, config.training.loss_weights, confidence_targets,
         )
 
-        total_loss += metrics["loss/total"]
+        for key, val in metrics.items():
+            accumulated[key] = accumulated.get(key, 0.0) + val
         num_batches += 1
 
-    return {"loss/val": total_loss / max(num_batches, 1)}
+    n = max(num_batches, 1)
+    result = {f"val/{k.removeprefix('loss/')}": v / n for k, v in accumulated.items()}
+    for key in ("total", "value", "tangent", "interpolation", "confidence"):
+        result.setdefault(f"val/{key}", 0.0)
+    return result
 
 
 def save_checkpoint(
@@ -473,13 +483,21 @@ def train(
             train_dataset.reload_cache()
 
             all_metrics = {**train_metrics, **val_metrics}
-            print(f"  train_loss={train_metrics['loss/train']:.4f}"
-                  f"  val_loss={val_metrics['loss/val']:.4f}", flush=True)
+            train_total = train_metrics["train/total"]
+            val_total = val_metrics["val/total"]
+            print(
+                f"  train={train_total:.4f}  val={val_total:.4f}"
+                f"  (v={val_metrics['val/value']:.4f}"
+                f" t={val_metrics['val/tangent']:.4f}"
+                f" i={val_metrics['val/interpolation']:.4f}"
+                f" c={val_metrics['val/confidence']:.4f})",
+                flush=True,
+            )
 
             checkpoint_time_sec = 0.0
 
-            if val_metrics["loss/val"] < best_val_loss:
-                best_val_loss = val_metrics["loss/val"]
+            if val_total < best_val_loss:
+                best_val_loss = val_total
                 epochs_without_improvement = 0
                 with TimingLog.measure() as ckpt_time:
                     save_checkpoint(
@@ -500,6 +518,17 @@ def train(
                     )
                 checkpoint_time_sec += ckpt_time["elapsed"]
 
+            loss_detail = {
+                f"{prefix}_{name}": round(all_metrics[key], 6)
+                for prefix, phase in [("train", "train"), ("val", "val")]
+                for name, key in [
+                    ("loss", f"{phase}/total"),
+                    ("value", f"{phase}/value"),
+                    ("tangent", f"{phase}/tangent"),
+                    ("interp", f"{phase}/interpolation"),
+                    ("confidence", f"{phase}/confidence"),
+                ]
+            }
             timing_log.write_epoch(epoch, {
                 "train_sec": round(train_time["elapsed"], 3),
                 "val_sec": round(val_time["elapsed"], 3),
@@ -508,8 +537,7 @@ def train(
                     train_time["elapsed"] + val_time["elapsed"] + checkpoint_time_sec, 3,
                 ),
                 "num_steps": steps_per_epoch,
-                "train_loss": round(train_metrics["loss/train"], 6),
-                "val_loss": round(val_metrics["loss/val"], 6),
+                **loss_detail,
             })
 
             gc.collect()

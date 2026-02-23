@@ -180,8 +180,8 @@ class TestOverfitTinyBatch:
                 model, dataset, optimizer, scheduler, config, device, epoch,
             )
             if first_loss is None:
-                first_loss = metrics["loss/train"]
-            last_loss = metrics["loss/train"]
+                first_loss = metrics["train/total"]
+            last_loss = metrics["train/total"]
 
         dataset.close()
         assert last_loss is not None
@@ -212,7 +212,7 @@ class TestLossDecreases:
             metrics = train_one_epoch(
                 model, dataset, optimizer, scheduler, config, device, epoch,
             )
-            epoch_losses.append(metrics["loss/train"])
+            epoch_losses.append(metrics["train/total"])
 
         dataset.close()
         assert epoch_losses[-1] < epoch_losses[0]
@@ -340,7 +340,7 @@ class TestMemoryCleanupPreservesState:
             metrics = train_one_epoch(
                 model, dataset, optimizer, scheduler, config, device, epoch,
             )
-            epoch_losses.append(metrics["loss/train"])
+            epoch_losses.append(metrics["train/total"])
             gc.collect()
 
         dataset.close()
@@ -403,5 +403,5 @@ class TestValidate:
         metrics = validate(model, loader, config, device)
 
         dataset.close()
-        assert "loss/val" in metrics
-        assert metrics["loss/val"] > 0
+        assert "val/total" in metrics
+        assert metrics["val/total"] > 0
