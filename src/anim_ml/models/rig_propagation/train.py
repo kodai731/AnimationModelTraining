@@ -26,6 +26,7 @@ from anim_ml.utils.checkpoint import (
     save_training_checkpoint,
 )
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
+from anim_ml.utils.batch_budget import resolve_batch_size
 from anim_ml.utils.memory_budget import create_memory_budget
 from anim_ml.utils.optimizer import DmlAdamW
 from anim_ml.utils.preparation_log import PreparationLog
@@ -367,8 +368,13 @@ def train(
                  train_samples=len(train_dataset), val_samples=len(val_dataset))
 
     model = RigPropagationModel(config.model).to(device)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", flush=True)
-    prep_log.log("model_created", params=sum(p.numel() for p in model.parameters()))
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {param_count:,}", flush=True)
+    prep_log.log("model_created", params=param_count)
+
+    batch_result = resolve_batch_size(device, config.training.batch_size, param_count)
+    config.training.batch_size = batch_result.batch_size
+    print(f"Batch size: {batch_result.batch_size} ({batch_result.reason})", flush=True)
 
     pin_memory = supports_pin_memory(device)
 
