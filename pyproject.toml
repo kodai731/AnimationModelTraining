@@ -60,6 +60,7 @@ pythonVersion = "3.11"
 typeCheckingMode = "strict"
 venvPath = "."
 venv = ".venv"
+reportUnknownMemberType = false
 exclude = [
     "src/anim_ml/server/proto/animation_ml_pb2.py",
     "src/anim_ml/server/proto/animation_ml_pb2_grpc.py",

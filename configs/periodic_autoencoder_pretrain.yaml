@@ -1,0 +1,15 @@
+model:
+  window_size: 64
+  latent_channels: 5
+  feature_dim: 15
+
+training:
+  batch_size: 512
+  epochs: 50
+  learning_rate: 1.0e-3
+  weight_decay: 0.01
+
+data_files:
+  - data/processed/all_curves.h5
+
+output_dir: runs/periodic_autoencoder

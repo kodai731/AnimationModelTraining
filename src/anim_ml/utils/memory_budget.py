@@ -8,6 +8,10 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _CONFIG_PATH = _PROJECT_ROOT / "paths.toml"
 
+_MEMORY_TIERS_MB = (500, 1024, 2048, 4096, 8192, 16384, 24576, 32768)
+_OVERHEAD_MB = 1500
+_MB_TO_BYTES = 1024 * 1024
+
 
 def get_configured_budget_mb() -> int:
     with open(_CONFIG_PATH, "rb") as f:
@@ -53,11 +57,25 @@ def _get_available_memory_linux() -> int:
     return 4096
 
 
+def select_memory_tier_mb(available_mb: int, max_budget_mb: int) -> int:
+    data_budget = available_mb - _OVERHEAD_MB
+    effective = min(data_budget, max_budget_mb)
+
+    selected = 0
+    for tier in _MEMORY_TIERS_MB:
+        if tier <= effective:
+            selected = tier
+        else:
+            break
+
+    return selected
+
+
 def resolve_cache_budget_bytes() -> int:
     configured = get_configured_budget_mb()
     available = get_available_memory_mb()
     capped = min(configured, int(available * 0.75))
-    return max(capped, 0) * 1024 * 1024
+    return max(capped, 0) * _MB_TO_BYTES
 
 
 class MemoryBudget:
@@ -82,13 +100,24 @@ class MemoryBudget:
     def release(self, name: str) -> None:
         self._allocations.pop(name, None)
 
+    def refresh(self) -> tuple[int, int] | None:
+        available = get_available_memory_mb()
+        configured = get_configured_budget_mb()
+        new_tier_mb = select_memory_tier_mb(available, configured)
 
-_OVERHEAD_MB = 1500
+        old_bytes = self._total_bytes
+        new_bytes = new_tier_mb * _MB_TO_BYTES
+
+        self._total_bytes = new_bytes
+        self._allocations.clear()
+
+        if old_bytes != new_bytes:
+            return (old_bytes, new_bytes)
+        return None
 
 
 def create_memory_budget() -> MemoryBudget:
     available = get_available_memory_mb()
     configured = get_configured_budget_mb()
-    data_budget = max(available - _OVERHEAD_MB, 0)
-    capped = min(configured, data_budget)
-    return MemoryBudget(total_bytes=max(capped, 0) * 1024 * 1024)
+    tier_mb = select_memory_tier_mb(available, configured)
+    return MemoryBudget(total_bytes=tier_mb * _MB_TO_BYTES)

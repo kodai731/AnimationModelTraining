@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 from typing import TYPE_CHECKING, cast
 
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from anim_ml.utils.preparation_log import PreparationLog
 
 UNK_TOKEN = 1
+PAE_WINDOW_SIZE = 64
 
 _FIELD_DTYPES: dict[str, torch.dtype] = {
     "context_keyframes": torch.float32,
@@ -24,7 +26,14 @@ _FIELD_DTYPES: dict[str, torch.dtype] = {
     "property_type": torch.int64,
     "topology_features": torch.float32,
     "bone_name_tokens": torch.int64,
-    "query_time": torch.float32,
+    "query_times": torch.float32,
+    "curve_window": torch.float32,
+    "valid_steps": torch.int64,
+}
+
+_OPTIONAL_FALLBACK_SHAPES: dict[str, tuple[int, ...]] = {
+    "curve_window": (PAE_WINDOW_SIZE,),
+    "valid_steps": (),
 }
 
 _DTYPE_BYTE_SIZES: dict[torch.dtype, int] = {
@@ -90,6 +99,7 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
         self._apply_chunk_size(effective_budget)
 
         self._chunk_index = 0
+        self._epoch_offset: int = 0
         self._cache: dict[str, torch.Tensor] = {}
         self._loaded_count = 0
 
@@ -109,6 +119,10 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
         return self._loaded_count >= self._total_count
 
     @property
+    def num_chunks(self) -> int:
+        return self._num_chunks
+
+    @property
     def total_count(self) -> int:
         return self._total_count
 
@@ -126,7 +140,8 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
 
         chunk_size = self._total_count
         if effective_budget > 0 and self._per_sample_bytes > 0 and self._total_count > 0:
-            budget_samples = effective_budget // self._per_sample_bytes
+            usable_budget = int(effective_budget * 0.85)
+            budget_samples = usable_budget // self._per_sample_bytes
             chunk_size = max(min(budget_samples, self._total_count), 1)
 
         self._chunk_size = chunk_size
@@ -135,30 +150,63 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
         else:
             self._num_chunks = 1
 
+    def begin_epoch(self, epoch: int) -> None:
+        if self._chunk_size < self._total_count:
+            self._epoch_offset = random.Random(epoch).randint(0, self._chunk_size - 1)
+        else:
+            self._epoch_offset = 0
+
     def _load_current_chunk(self) -> None:
         if self._total_count == 0 or self._chunk_size == 0:
+            self._cache.clear()
             self._loaded_count = 0
             return
 
-        chunk_start = self._chunk_index * self._chunk_size
-        chunk_count = min(self._chunk_size, self._total_count - chunk_start)
+        samples_before = self._chunk_index * self._chunk_size
+        chunk_count = min(self._chunk_size, self._total_count - samples_before)
+        chunk_start = (self._epoch_offset + samples_before) % self._total_count
 
-        self._cache.clear()
-
-        file_slices = self._collect_file_slices(chunk_start, chunk_count)
+        tail = self._total_count - chunk_start
+        if chunk_count <= tail:
+            file_slices = self._collect_file_slices(chunk_start, chunk_count)
+        else:
+            file_slices = self._collect_file_slices(chunk_start, tail)
+            file_slices += self._collect_file_slices(0, chunk_count - tail)
 
         for key, dtype in _FIELD_DTYPES.items():
+            self._cache.pop(key, None)
+
             parts: list[torch.Tensor] = []
+            hdf5_key = key
             for file_idx, local_start, local_end in file_slices:
                 with h5py.File(self._paths[file_idx], "r") as f:
                     split_grp = cast("h5py.Group", f[self._split])
-                    ds = cast("h5py.Dataset", split_grp[key])
-                    parts.append(torch.as_tensor(ds[local_start:local_end], dtype=dtype))
+
+                    resolved_key = hdf5_key
+                    is_legacy_query_time = (
+                        hdf5_key == "query_times"
+                        and hdf5_key not in split_grp
+                        and "query_time" in split_grp
+                    )
+                    if is_legacy_query_time:
+                        resolved_key = "query_time"
+
+                    if resolved_key not in split_grp and key in _OPTIONAL_FALLBACK_SHAPES:
+                        count = local_end - local_start
+                        fallback_shape = (count,) + _OPTIONAL_FALLBACK_SHAPES[key]
+                        parts.append(torch.zeros(fallback_shape, dtype=dtype))
+                    else:
+                        ds = cast("h5py.Dataset", split_grp[resolved_key])
+                        parts.append(torch.as_tensor(ds[local_start:local_end], dtype=dtype))
+
             self._cache[key] = torch.cat(parts)
             del parts
 
-        if self._cache["query_time"].ndim == 1:
-            self._cache["query_time"] = self._cache["query_time"].unsqueeze(-1)
+        if self._cache["query_times"].ndim == 1:
+            self._cache["query_times"] = self._cache["query_times"].unsqueeze(-1)
+
+        if self._cache["valid_steps"].ndim == 1 and self._cache["valid_steps"].sum() == 0:
+            self._cache["valid_steps"] = torch.ones_like(self._cache["valid_steps"])
 
         self._loaded_count = chunk_count
 
@@ -221,13 +269,18 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
             "property_type": self._cache["property_type"][index],
             "topology_features": self._cache["topology_features"][index],
             "bone_name_tokens": tokens,
-            "query_time": self._cache["query_time"][index],
+            "query_times": self._cache["query_times"][index],
+            "curve_window": self._cache["curve_window"][index],
+            "valid_steps": self._cache["valid_steps"][index],
         }
 
-    def reload_chunk(self) -> None:
+    def reload_chunk(self, chunk_index: int | None = None) -> None:
         if self.is_fully_loaded:
             return
-        self._chunk_index = (self._chunk_index + 1) % self._num_chunks
+        if chunk_index is not None:
+            self._chunk_index = chunk_index % self._num_chunks
+        else:
+            self._chunk_index = (self._chunk_index + 1) % self._num_chunks
         self._load_current_chunk()
 
     def close(self) -> None:
@@ -239,9 +292,19 @@ class CurveCopilotDataset(Dataset[dict[str, torch.Tensor]]):
 def _compute_per_sample_bytes(grp: h5py.Group) -> int:
     total = 0
     for key, dtype in _FIELD_DTYPES.items():
-        ds = cast("h5py.Dataset", grp[key])
-        shape = cast("tuple[int, ...]", ds.shape)  # pyright: ignore[reportUnknownMemberType]
-        sample_elements = math.prod(shape[1:]) if len(shape) > 1 else 1
+        resolved_key = key
+        if key == "query_times" and key not in grp and "query_time" in grp:
+            resolved_key = "query_time"
+
+        if resolved_key not in grp and key in _OPTIONAL_FALLBACK_SHAPES:
+            fallback = _OPTIONAL_FALLBACK_SHAPES[key]
+            sample_elements = math.prod(fallback) if fallback else 1
+        elif resolved_key in grp:
+            ds = cast("h5py.Dataset", grp[resolved_key])
+            shape = cast("tuple[int, ...]", ds.shape)  # pyright: ignore[reportUnknownMemberType]
+            sample_elements = math.prod(shape[1:]) if len(shape) > 1 else 1
+        else:
+            sample_elements = 1
         total += sample_elements * _DTYPE_BYTE_SIZES[dtype]
     return total
 

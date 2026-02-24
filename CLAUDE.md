@@ -58,15 +58,6 @@ Embedded models consumed by `ort` crate in Rust must satisfy:
 Training data from CMU MoCap (public domain) + 100STYLE (CC BY 4.0).
 Mixamo is prohibited for ML training (Adobe ToS). AMASS is research-only.
 
-## Design Documents
-
-Detailed design in `.claude/local/Design/`:
-- `Architecture.md` — Repository structure, tech stack, phased delivery
-- `DataPipeline.md` — BVH→training sample conversion pipeline
-- `CurveCopilotModel.md` — Model architecture, I/O spec, training, ONNX export
-- `RigPropagationModel.md` — GNN architecture, skeleton mapping, training
-- `TextToMotionServer.md` — gRPC proto, motion conversion pipeline, deployment
-
 ## Last Conservation
 - read the last conversation before start session
 - .claude/local/last-conversation
@@ -78,3 +69,12 @@ Detailed design in `.claude/local/Design/`:
 ### Log
 the issues from rendering project is restored at ../SharedData/log/Rendering or log/Training
 Read the issues and improve the training data quality.
+
+## Documents
+Document files are located at SharedData directory to share that for Rust_Rendering.
+Detailed design in `../SharedData/document/AnimationModelTraining/Design/`:
+- `Architecture.md` — Repository structure, tech stack, phased delivery
+- `DataPipeline.md` — BVH→training sample conversion pipeline
+- `CurveCopilotModel.md` — Model architecture, I/O spec, training, ONNX export
+- `RigPropagationModel.md` — GNN architecture, skeleton mapping, training
+- `TextToMotionServer.md` — gRPC proto, motion conversion pipeline, deployment

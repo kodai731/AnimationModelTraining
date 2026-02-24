@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import gc
+
 import h5py
 import numpy as np
 import pytest
@@ -25,9 +27,8 @@ from anim_ml.models.rig_propagation.train import (
     train_one_epoch,
     validate,
 )
+from anim_ml.utils.checkpoint import CheckpointState, restore_checkpoint_state
 from anim_ml.utils.preparation_log import PreparationLog
-
-import gc
 
 NUM_TEST_JOINTS = 20
 PARENT_INDICES = [
@@ -197,11 +198,8 @@ class TestOverfitTinyBatch:
         hdf5_path = _create_test_hdf5(tmp_path)
         dataset = RigPropagationDataset([hdf5_path], split="train")
 
-        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-            dataset, batch_size=min(len(dataset), 32), shuffle=True, num_workers=0,
-        )
-
         config = _make_train_config()
+        config.training.batch_size = min(len(dataset), 32)
         config.training.epochs = 50
         config.training.learning_rate = 5e-3
         config.output.log_every_steps = 999
@@ -209,7 +207,7 @@ class TestOverfitTinyBatch:
         model = RigPropagationModel(config.model)
         device = torch.device("cpu")
 
-        steps_per_epoch = max(len(loader), 1)
+        steps_per_epoch = max(len(dataset) // config.training.batch_size, 1)
         optimizer, scheduler = create_optimizer_and_scheduler(
             model, config.training, steps_per_epoch,
         )
@@ -217,7 +215,9 @@ class TestOverfitTinyBatch:
         first_loss = None
         last_loss = None
         for epoch in range(1, config.training.epochs + 1):
-            metrics = train_one_epoch(model, loader, optimizer, scheduler, config, device, epoch)
+            metrics, _ = train_one_epoch(
+                model, dataset, optimizer, scheduler, config, device, epoch,
+            )
             if first_loss is None:
                 first_loss = metrics["loss/train"]
             last_loss = metrics["loss/train"]
@@ -234,24 +234,23 @@ class TestLossDecreases:
         hdf5_path = _create_test_hdf5(tmp_path)
         dataset = RigPropagationDataset([hdf5_path], split="train")
 
-        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-            dataset, batch_size=min(len(dataset), 32), shuffle=True, num_workers=0,
-        )
-
         config = _make_train_config()
+        config.training.batch_size = min(len(dataset), 32)
         config.training.learning_rate = 5e-3
         config.output.log_every_steps = 999
         model = RigPropagationModel(config.model)
         device = torch.device("cpu")
 
-        steps_per_epoch = max(len(loader), 1)
+        steps_per_epoch = max(len(dataset) // config.training.batch_size, 1)
         optimizer, scheduler = create_optimizer_and_scheduler(
             model, config.training, steps_per_epoch,
         )
 
         epoch_losses = []
         for epoch in range(1, 6):
-            metrics = train_one_epoch(model, loader, optimizer, scheduler, config, device, epoch)
+            metrics, _ = train_one_epoch(
+                model, dataset, optimizer, scheduler, config, device, epoch,
+            )
             epoch_losses.append(metrics["loss/train"])
 
         dataset.close()
@@ -264,21 +263,18 @@ class TestMemoryCleanupPreservesState:
         hdf5_path = _create_test_hdf5(tmp_path)
         dataset = RigPropagationDataset([hdf5_path], split="train")
 
-        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-            dataset, batch_size=min(len(dataset), 32), shuffle=True, num_workers=0,
-        )
-
         config = _make_train_config()
+        config.training.batch_size = min(len(dataset), 32)
         config.output.log_every_steps = 999
         model = RigPropagationModel(config.model)
         device = torch.device("cpu")
 
-        steps_per_epoch = max(len(loader), 1)
+        steps_per_epoch = max(len(dataset) // config.training.batch_size, 1)
         optimizer, scheduler = create_optimizer_and_scheduler(
             model, config.training, steps_per_epoch,
         )
 
-        train_one_epoch(model, loader, optimizer, scheduler, config, device, 1)
+        train_one_epoch(model, dataset, optimizer, scheduler, config, device, 1)
 
         weights_before = {k: v.clone() for k, v in model.state_dict().items()}
         scheduler_lr_before = scheduler.get_last_lr()[0]
@@ -304,24 +300,23 @@ class TestMemoryCleanupPreservesState:
         hdf5_path = _create_test_hdf5(tmp_path)
         dataset = RigPropagationDataset([hdf5_path], split="train")
 
-        loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-            dataset, batch_size=min(len(dataset), 32), shuffle=True, num_workers=0,
-        )
-
         config = _make_train_config()
+        config.training.batch_size = min(len(dataset), 32)
         config.training.learning_rate = 5e-3
         config.output.log_every_steps = 999
         model = RigPropagationModel(config.model)
         device = torch.device("cpu")
 
-        steps_per_epoch = max(len(loader), 1)
+        steps_per_epoch = max(len(dataset) // config.training.batch_size, 1)
         optimizer, scheduler = create_optimizer_and_scheduler(
             model, config.training, steps_per_epoch,
         )
 
         epoch_losses = []
         for epoch in range(1, 6):
-            metrics = train_one_epoch(model, loader, optimizer, scheduler, config, device, epoch)
+            metrics, _ = train_one_epoch(
+                model, dataset, optimizer, scheduler, config, device, epoch,
+            )
             epoch_losses.append(metrics["loss/train"])
             gc.collect()
 
@@ -378,8 +373,10 @@ class TestCheckpoint:
         )
 
         checkpoint_path = tmp_path / "test_ckpt.pt"
+        state = CheckpointState(epoch=1, global_step=100, is_mid_epoch=False,
+                                best_val_loss=0.5, epochs_without_improvement=0)
         save_checkpoint(
-            model, optimizer, scheduler, epoch=1,
+            model, optimizer, scheduler, state,
             metrics={"loss/val": 0.5}, path=checkpoint_path,
         )
 
@@ -387,10 +384,98 @@ class TestCheckpoint:
 
         loaded = load_checkpoint(checkpoint_path, torch.device("cpu"))
         assert loaded["epoch"] == 1
+        assert loaded["global_step"] == 100
+        assert loaded["is_mid_epoch"] is False
         assert loaded["metrics"]["loss/val"] == 0.5
 
         model2 = RigPropagationModel(config)
         model2.load_state_dict(loaded["model_state_dict"])
+
+    def test_mid_epoch_checkpoint_round_trip(self, tmp_path: Path) -> None:
+        config = _make_small_config()
+        model = RigPropagationModel(config)
+        optimizer, scheduler = create_optimizer_and_scheduler(
+            model, TrainingConfig(), steps_per_epoch=10,
+        )
+
+        checkpoint_path = tmp_path / "mid_epoch.pt"
+        state = CheckpointState(epoch=3, global_step=250, is_mid_epoch=True,
+                                best_val_loss=0.42, epochs_without_improvement=2)
+        save_checkpoint(model, optimizer, scheduler, state,
+                        metrics={}, path=checkpoint_path)
+
+        loaded = load_checkpoint(checkpoint_path, torch.device("cpu"))
+        restored = restore_checkpoint_state(loaded)
+
+        assert restored.epoch == 3
+        assert restored.global_step == 250
+        assert restored.is_mid_epoch is True
+        assert restored.best_val_loss == pytest.approx(0.42)
+        assert restored.epochs_without_improvement == 2
+
+    def test_resume_mid_epoch_restarts_same_epoch(self, tmp_path: Path) -> None:
+        config = _make_small_config()
+        model = RigPropagationModel(config)
+        optimizer, scheduler = create_optimizer_and_scheduler(
+            model, TrainingConfig(), steps_per_epoch=10,
+        )
+
+        checkpoint_path = tmp_path / "mid.pt"
+        state = CheckpointState(epoch=5, global_step=400, is_mid_epoch=True,
+                                best_val_loss=0.3, epochs_without_improvement=1)
+        save_checkpoint(model, optimizer, scheduler, state,
+                        metrics={}, path=checkpoint_path)
+
+        loaded = load_checkpoint(checkpoint_path, torch.device("cpu"))
+        restored = restore_checkpoint_state(loaded)
+
+        start_epoch = restored.epoch if restored.is_mid_epoch else restored.epoch + 1
+        assert start_epoch == 5
+
+    def test_resume_completed_epoch_starts_next(self, tmp_path: Path) -> None:
+        config = _make_small_config()
+        model = RigPropagationModel(config)
+        optimizer, scheduler = create_optimizer_and_scheduler(
+            model, TrainingConfig(), steps_per_epoch=10,
+        )
+
+        checkpoint_path = tmp_path / "done.pt"
+        state = CheckpointState(epoch=5, global_step=500, is_mid_epoch=False,
+                                best_val_loss=0.3, epochs_without_improvement=0)
+        save_checkpoint(model, optimizer, scheduler, state,
+                        metrics={}, path=checkpoint_path)
+
+        loaded = load_checkpoint(checkpoint_path, torch.device("cpu"))
+        restored = restore_checkpoint_state(loaded)
+
+        start_epoch = restored.epoch if restored.is_mid_epoch else restored.epoch + 1
+        assert start_epoch == 6
+
+    def test_backward_compat_old_checkpoint(self, tmp_path: Path) -> None:
+        config = _make_small_config()
+        model = RigPropagationModel(config)
+        optimizer, scheduler = create_optimizer_and_scheduler(
+            model, TrainingConfig(), steps_per_epoch=10,
+        )
+
+        checkpoint_path = tmp_path / "old_format.pt"
+        torch.save({  # pyright: ignore[reportUnknownMemberType]
+            "epoch": 10,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "metrics": {"loss/val": 0.6},
+            "best_val_loss": 0.4,
+        }, checkpoint_path)
+
+        loaded = load_checkpoint(checkpoint_path, torch.device("cpu"))
+        restored = restore_checkpoint_state(loaded)
+
+        assert restored.epoch == 10
+        assert restored.global_step == 0
+        assert restored.is_mid_epoch is False
+        assert restored.best_val_loss == pytest.approx(0.4)
+        assert restored.epochs_without_improvement == 0
 
 
 @pytest.mark.unit

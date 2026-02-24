@@ -5,6 +5,17 @@ model:
   n_layers: 6
   max_seq: 8
   dropout: 0.1
+  periodic_time_encoding: true
+  num_experts: 3
+  use_expert_mixing: true
+  use_pae: true
+  pae_window_size: 64
+  pae_latent_channels: 5
+  enhanced_gating: true
+  use_multi_resolution: true
+  multi_res_branch_dim: 32
+  use_phase_detection: true
+  max_steps: 3
 
 training:
   batch_size: 2048
@@ -14,11 +25,14 @@ training:
   warmup_epochs: 5
   gradient_clip: 1.0
   early_stopping_patience: 15
+  step_decay: [1.0, 0.8, 0.6]
   loss_weights:
     value: 1.0
     tangent: 0.5
     interpolation: 0.3
     confidence: 0.2
+    smoothness: 0.1
+    frequency: 0.05
 
 data:
   train_files:

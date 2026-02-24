@@ -351,8 +351,8 @@ def append_rig_samples_to_hdf5(
     else:
         for name, arr in arrays.items():
             ds = grp[name]
-            ds.resize(current_count + n_new, axis=0)
-            ds[current_count : current_count + n_new] = arr
+            ds.resize(current_count + n_new, axis=0)  # type: ignore[union-attr]
+            ds[current_count : current_count + n_new] = arr  # type: ignore[index]
 
     return current_count + n_new
 
