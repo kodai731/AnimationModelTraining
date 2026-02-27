@@ -110,7 +110,7 @@ def _make_train_config() -> TrainConfig:
 @pytest.mark.unit
 class TestComputeLoss:
     def test_returns_scalar_loss(self) -> None:
-        prediction = torch.randn(4, 6, requires_grad=True)
+        prediction = torch.randn(4, 5, requires_grad=True)
         confidence = torch.rand(4, 1, requires_grad=True)
         target = torch.randn(4, 6)
         weights = LossWeights()
@@ -131,7 +131,7 @@ class TestComputeLoss:
 
     def test_zero_loss_for_perfect_prediction(self) -> None:
         target = torch.tensor([[0.5, 1.0, 0.1, 0.2, 0.3, 0.4]])
-        prediction = torch.tensor([[1.0, 0.1, 0.2, 0.3, 0.4, 100.0]])
+        prediction = torch.tensor([[1.0, 0.1, 0.2, 0.3, 0.4]])
         confidence = torch.ones(1, 1)
         confidence_targets = torch.ones(1, 1)
 
@@ -147,7 +147,7 @@ class TestComputeLoss:
 @pytest.mark.unit
 class TestComputeMultistepLoss:
     def test_returns_scalar_loss(self) -> None:
-        predictions = torch.randn(4, 3, 6, requires_grad=True)
+        predictions = torch.randn(4, 3, 5, requires_grad=True)
         confidences = torch.rand(4, 3, 1, requires_grad=True)
         targets = torch.randn(4, 3, 6)
         valid_steps = torch.tensor([3, 3, 2, 1])
@@ -165,7 +165,7 @@ class TestComputeMultistepLoss:
         assert "step1/loss/total" in metrics
 
     def test_valid_steps_mask(self) -> None:
-        predictions = torch.randn(4, 3, 6, requires_grad=True)
+        predictions = torch.randn(4, 3, 5, requires_grad=True)
         confidences = torch.rand(4, 3, 1, requires_grad=True)
         targets = torch.randn(4, 3, 6)
         context = torch.randn(4, 8, 6)
@@ -186,7 +186,7 @@ class TestComputeMultistepLoss:
         assert loss_all.item() != loss_one.item()
 
     def test_step_decay_weighting(self) -> None:
-        predictions = torch.randn(4, 2, 6, requires_grad=True)
+        predictions = torch.randn(4, 2, 5, requires_grad=True)
         confidences = torch.rand(4, 2, 1, requires_grad=True)
         targets = torch.randn(4, 2, 6)
         valid_steps = torch.tensor([2, 2, 2, 2])
@@ -206,7 +206,7 @@ class TestComputeMultistepLoss:
         assert loss_equal.item() != loss_decayed.item()
 
     def test_backward_compatible_metrics(self) -> None:
-        predictions = torch.randn(4, 2, 6, requires_grad=True)
+        predictions = torch.randn(4, 2, 5, requires_grad=True)
         confidences = torch.rand(4, 2, 1, requires_grad=True)
         targets = torch.randn(4, 2, 6)
         valid_steps = torch.tensor([2, 2, 2, 2])
@@ -242,7 +242,7 @@ class TestSingleStepBackwardCompat:
                 query_times,
             )
 
-        assert pred.shape == (1, 1, 6)
+        assert pred.shape == (1, 1, 5)
         assert conf.shape == (1, 1, 1)
 
     def test_multistep_model_output_shape(self) -> None:
@@ -263,7 +263,7 @@ class TestSingleStepBackwardCompat:
                 query_times,
             )
 
-        assert pred.shape == (2, 3, 6)
+        assert pred.shape == (2, 3, 5)
         assert conf.shape == (2, 3, 1)
 
 
@@ -654,7 +654,7 @@ class TestFrequencyLoss:
     def test_short_context(self) -> None:
         prediction_value = torch.randn(4)
         target_value = torch.randn(4)
-        context = torch.randn(4, 2, 6)
+        context = torch.randn(4, 2, 5)
 
         loss = compute_frequency_loss(prediction_value, target_value, context)
 
@@ -798,7 +798,7 @@ class TestDmlCompatibility:
         assert not rec.blocked, f"DML-incompatible ops in forward: {rec.blocked}"
 
     def test_loss_computation_no_blocked_ops(self) -> None:
-        prediction = torch.randn(4, 6)
+        prediction = torch.randn(4, 5)
         confidence = torch.rand(4, 1)
         target = torch.randn(4, 6)
         weights = LossWeights()
@@ -821,7 +821,8 @@ class TestDmlCompatibility:
         predictions, confidences = model(**inputs)
         prediction = predictions[:, 0, :]
         confidence = confidences[:, 0, :]
-        target = torch.randn_like(prediction)
+        batch = prediction.shape[0]
+        target = torch.randn(batch, 6)
         confidence_targets = torch.rand_like(confidence)
         loss, _ = compute_loss(
             prediction, confidence, target, LossWeights(),
@@ -843,7 +844,8 @@ class TestDmlCompatibility:
         predictions, confidences = model(**inputs)
         prediction = predictions[:, 0, :]
         confidence = confidences[:, 0, :]
-        target = torch.randn_like(prediction)
+        batch = prediction.shape[0]
+        target = torch.randn(batch, 6)
         confidence_targets = torch.rand_like(confidence)
         loss, _ = compute_loss(
             prediction, confidence, target, LossWeights(),
@@ -914,7 +916,7 @@ class TestDmlCompatibility:
         assert confidences.dtype not in DML_UNSUPPORTED_DTYPES
 
     def test_no_unsupported_dtypes_in_loss(self) -> None:
-        prediction = torch.randn(4, 6, requires_grad=True)
+        prediction = torch.randn(4, 5, requires_grad=True)
         confidence = torch.rand(4, 1, requires_grad=True)
         target = torch.randn(4, 6)
         weights = LossWeights()
@@ -941,7 +943,8 @@ class TestDmlCompatibility:
         predictions, confidences = model(**inputs)
         prediction = predictions[:, 0, :]
         confidence = confidences[:, 0, :]
-        target = torch.randn_like(prediction)
+        batch = prediction.shape[0]
+        target = torch.randn(batch, 6)
         confidence_targets = torch.rand_like(confidence)
         loss, _ = compute_loss(
             prediction, confidence, target, LossWeights(),
@@ -969,7 +972,8 @@ class TestDmlCompatibility:
             predictions, confidences = model(**inputs)
             prediction = predictions[:, 0, :]
             confidence = confidences[:, 0, :]
-            target = torch.randn_like(prediction)
+            batch = prediction.shape[0]
+            target = torch.randn(batch, 6)
             confidence_targets = torch.rand_like(confidence)
             loss, _ = compute_loss(
                 prediction, confidence, target, LossWeights(),

@@ -318,7 +318,7 @@ class CurveCopilotModel(nn.Module):
             self.phase_detector = PhaseDetector(config.d_model)
 
         self.output_norm = nn.LayerNorm(config.d_model)
-        self.prediction_head = nn.Linear(config.d_model, 6)
+        self.prediction_head = nn.Linear(config.d_model, 5)
         self.confidence_head = nn.Linear(config.d_model, 1)
 
         total_positions = config.max_seq + config.max_steps

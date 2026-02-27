@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader
 from anim_ml.data.curve_dataset import CurveCopilotDataset
 from anim_ml.models.curve_copilot.model import CurveCopilotConfig, CurveCopilotModel
 from anim_ml.paths import resolve_data_path
+from anim_ml.utils.batch_budget import resolve_batch_size
 from anim_ml.utils.checkpoint import (
     CheckpointState,
     load_training_checkpoint,
@@ -28,7 +29,6 @@ from anim_ml.utils.checkpoint import (
     save_training_checkpoint,
 )
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
-from anim_ml.utils.batch_budget import resolve_batch_size
 from anim_ml.utils.memory_budget import create_memory_budget
 from anim_ml.utils.optimizer import DmlAdamW
 from anim_ml.utils.preparation_log import PreparationLog
@@ -39,7 +39,6 @@ from anim_ml.utils.timing_log import BatchTimingLog, TimingLog
 class LossWeights:
     value: float = 1.0
     tangent: float = 0.5
-    interpolation: float = 0.3
     confidence: float = 0.2
     smoothness: float = 0.1
     frequency: float = 0.05
@@ -154,16 +153,6 @@ def compute_loss(
     value_loss = _huber_loss(prediction[:, 0], target[:, 1], delta=1.0)
     tangent_loss = mse(prediction[:, 1:5], target[:, 2:6])
 
-    tangent_norms = torch.norm(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-        target[:, 2:6], dim=1,
-    )
-    tangent_magnitude = cast("torch.Tensor", tangent_norms)
-    interp_target = (tangent_magnitude > 0.01).float()
-    logits = prediction[:, 5]
-    interp_loss = (
-        logits.clamp(min=0) - logits * interp_target + torch.log1p(torch.exp(-logits.abs()))
-    ).mean()
-
     confidence_loss = mse(confidence, confidence_targets)
 
     smoothness_loss = torch.tensor(0.0, device=prediction.device)
@@ -182,7 +171,6 @@ def compute_loss(
     total = (
         weights.value * value_loss
         + weights.tangent * tangent_loss
-        + weights.interpolation * interp_loss
         + weights.confidence * confidence_loss
         + weights.smoothness * smoothness_loss
         + weights.frequency * frequency_loss
@@ -192,7 +180,6 @@ def compute_loss(
         "loss/total": total.item(),
         "loss/value": value_loss.item(),
         "loss/tangent": tangent_loss.item(),
-        "loss/interpolation": interp_loss.item(),
         "loss/confidence": confidence_loss.item(),
         "loss/smoothness": smoothness_loss.item(),
         "loss/frequency": frequency_loss.item(),
@@ -383,8 +370,7 @@ def train_one_epoch(
 
     n = max(num_batches, 1)
     result = {f"train/{k.removeprefix('loss/')}": v / n for k, v in accumulated.items()}
-    default_keys = ("total", "value", "tangent", "interpolation",
-                    "confidence", "smoothness", "frequency")
+    default_keys = ("total", "value", "tangent", "confidence", "smoothness", "frequency")
     for key in default_keys:
         result.setdefault(f"train/{key}", 0.0)
     return result, global_step + epoch_step
@@ -430,8 +416,7 @@ def validate(
 
     n = max(num_batches, 1)
     result = {f"val/{k.removeprefix('loss/')}": v / n for k, v in accumulated.items()}
-    default_keys = ("total", "value", "tangent", "interpolation",
-                    "confidence", "smoothness", "frequency")
+    default_keys = ("total", "value", "tangent", "confidence", "smoothness", "frequency")
     for key in default_keys:
         result.setdefault(f"val/{key}", 0.0)
     return result
@@ -619,7 +604,6 @@ def train(
                 f"  train={train_total:.4f}  val={val_total:.4f}"
                 f"  (v={val_metrics['val/value']:.4f}"
                 f" t={val_metrics['val/tangent']:.4f}"
-                f" i={val_metrics['val/interpolation']:.4f}"
                 f" c={val_metrics['val/confidence']:.4f}"
                 f" s={val_metrics['val/smoothness']:.4f}"
                 f" f={val_metrics['val/frequency']:.4f})",
@@ -659,7 +643,6 @@ def train(
                     ("loss", f"{phase}/total"),
                     ("value", f"{phase}/value"),
                     ("tangent", f"{phase}/tangent"),
-                    ("interp", f"{phase}/interpolation"),
                     ("confidence", f"{phase}/confidence"),
                     ("smoothness", f"{phase}/smoothness"),
                     ("freq", f"{phase}/frequency"),

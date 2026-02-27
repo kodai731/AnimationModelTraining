@@ -16,7 +16,8 @@
       "Bash(find:*)",
       "Bash(xargs:*)",
       "Bash(test:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(wc:*)"
     ]
   }
 }

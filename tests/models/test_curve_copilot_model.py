@@ -27,7 +27,7 @@ def _make_dummy_input(
         "property_type": torch.randint(0, 9, (batch,), device=device),
         "topology_features": torch.rand(batch, 6, device=device),
         "bone_name_tokens": torch.randint(0, 64, (batch, 32), device=device),
-        "query_time": torch.rand(batch, device=device),
+        "query_times": torch.rand(batch, device=device),
     }
     if include_curve_window:
         inputs["curve_window"] = torch.randn(batch, window_size, device=device)
@@ -48,8 +48,8 @@ class TestForwardPass:
         model = CurveCopilotModel()
         inputs = _make_dummy_input(batch=batch)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (batch, 6)
-        assert confidence.shape == (batch, 1)
+        assert prediction.shape == (batch, 1, 5)
+        assert confidence.shape == (batch, 1, 1)
 
     def test_confidence_range(self) -> None:
         model = CurveCopilotModel()
@@ -127,8 +127,8 @@ class TestVariableSequenceLength:
         model = CurveCopilotModel()
         inputs = _make_dummy_input(batch=2, seq_len=seq_len)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
 
 def _make_periodic_config(**overrides: object) -> CurveCopilotConfig:
@@ -165,8 +165,8 @@ class TestPeriodicTimeEncoding:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input()
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_output_shapes_unchanged(self) -> None:
         config = _make_periodic_config()
@@ -174,8 +174,8 @@ class TestPeriodicTimeEncoding:
         batch = 4
         inputs = _make_dummy_input(batch=batch)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (batch, 6)
-        assert confidence.shape == (batch, 1)
+        assert prediction.shape == (batch, 1, 5)
+        assert confidence.shape == (batch, 1, 1)
 
     def test_within_budget(self) -> None:
         config = _make_periodic_config()
@@ -189,8 +189,8 @@ class TestPeriodicTimeEncoding:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(batch=2, seq_len=seq_len)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_causal_masking(self) -> None:
         config = _make_periodic_config(
@@ -283,8 +283,8 @@ class TestExpertMixing:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input()
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_output_shapes_unchanged(self) -> None:
         config = _make_expert_config()
@@ -292,8 +292,8 @@ class TestExpertMixing:
         batch = 4
         inputs = _make_dummy_input(batch=batch)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (batch, 6)
-        assert confidence.shape == (batch, 1)
+        assert prediction.shape == (batch, 1, 5)
+        assert confidence.shape == (batch, 1, 1)
 
     def test_within_budget(self) -> None:
         config = _make_expert_config()
@@ -307,8 +307,8 @@ class TestExpertMixing:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(batch=2, seq_len=seq_len)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_causal_masking(self) -> None:
         config = _make_expert_config(
@@ -365,8 +365,8 @@ class TestExpertMixingWithPeriodic:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input()
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_within_budget(self) -> None:
         config = _make_expert_config(periodic_time_encoding=True)
@@ -393,8 +393,8 @@ class TestPAEIntegration:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(include_curve_window=True)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_output_shapes_unchanged(self) -> None:
         config = _make_pae_config()
@@ -402,8 +402,8 @@ class TestPAEIntegration:
         batch = 4
         inputs = _make_dummy_input(batch=batch, include_curve_window=True)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (batch, 6)
-        assert confidence.shape == (batch, 1)
+        assert prediction.shape == (batch, 1, 5)
+        assert confidence.shape == (batch, 1, 1)
 
     def test_within_budget(self) -> None:
         config = _make_pae_config()
@@ -417,8 +417,8 @@ class TestPAEIntegration:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(batch=2, seq_len=seq_len, include_curve_window=True)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_all_parameters_receive_gradients(self) -> None:
         config = _make_pae_config()
@@ -438,8 +438,8 @@ class TestPAEIntegration:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(include_curve_window=False)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
 
 @pytest.mark.unit
@@ -456,8 +456,8 @@ class TestEnhancedGating:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input()
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_gate_weights_sum_to_one(self) -> None:
         gating = GatingNetwork(
@@ -496,16 +496,16 @@ class TestMultiResolution:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(include_curve_window=True)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_forward_without_curve_window(self) -> None:
         config = CurveCopilotConfig(use_multi_resolution=True)
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(include_curve_window=False)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_pae_and_multi_res_combined(self) -> None:
         config = CurveCopilotConfig(
@@ -515,8 +515,8 @@ class TestMultiResolution:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(include_curve_window=True)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
 
 @pytest.mark.unit
@@ -535,8 +535,8 @@ class TestPhaseDetection:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(include_curve_window=True)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_pae_and_phase_combined(self) -> None:
         config = CurveCopilotConfig(
@@ -546,8 +546,8 @@ class TestPhaseDetection:
         model = CurveCopilotModel(config)
         inputs = _make_dummy_input(include_curve_window=True)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
 
 @pytest.mark.unit
@@ -566,8 +566,8 @@ class TestAllPhase2Features:
         model = CurveCopilotModel(self._make_full_config())
         inputs = _make_dummy_input(include_curve_window=True)
         prediction, confidence = model(**inputs)
-        assert prediction.shape == (2, 6)
-        assert confidence.shape == (2, 1)
+        assert prediction.shape == (2, 1, 5)
+        assert confidence.shape == (2, 1, 1)
 
     def test_within_budget(self) -> None:
         model = CurveCopilotModel(self._make_full_config())

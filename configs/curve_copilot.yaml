@@ -29,7 +29,6 @@ training:
   loss_weights:
     value: 1.0
     tangent: 0.5
-    interpolation: 0.3
     confidence: 0.2
     smoothness: 0.1
     frequency: 0.05

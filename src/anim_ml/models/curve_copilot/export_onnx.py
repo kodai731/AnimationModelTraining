@@ -101,7 +101,7 @@ def export_to_onnx(
 
     onnx_model = onnx.load(str(output_path))
     onnx_model.metadata_props.append(
-        onnx.StringStringEntryProto(key="curve_copilot_version", value="2"),
+        onnx.StringStringEntryProto(key="curve_copilot_version", value="3"),
     )
     onnx_model.metadata_props.append(
         onnx.StringStringEntryProto(key="max_steps", value=str(max_steps)),

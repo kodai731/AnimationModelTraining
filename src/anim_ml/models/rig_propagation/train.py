@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 from anim_ml.data.rig_dataset import RigPropagationDataset
 from anim_ml.models.rig_propagation.model import RigPropagationConfig, RigPropagationModel
 from anim_ml.paths import resolve_data_path
+from anim_ml.utils.batch_budget import resolve_batch_size
 from anim_ml.utils.checkpoint import (
     CheckpointState,
     load_training_checkpoint,
@@ -26,7 +27,6 @@ from anim_ml.utils.checkpoint import (
     save_training_checkpoint,
 )
 from anim_ml.utils.device import detect_training_device, supports_pin_memory
-from anim_ml.utils.batch_budget import resolve_batch_size
 from anim_ml.utils.memory_budget import create_memory_budget
 from anim_ml.utils.optimizer import DmlAdamW
 from anim_ml.utils.preparation_log import PreparationLog
